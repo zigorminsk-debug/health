@@ -48,8 +48,8 @@ command -v convert >/dev/null 2>&1 || { echo "ERROR: нужен ImageMagick (con
 # ---------------- Версия / пути ----------------
 APP_NAME="ZI Medical tests"
 APP_ID="by.csl.budzdorov"
-VERSION_CODE="${VERSION_CODE:-67}"
-VERSION_NAME="${VERSION_NAME:-1.8.49}"
+VERSION_CODE="${VERSION_CODE:-68}"
+VERSION_NAME="${VERSION_NAME:-1.8.50}"
 
 BUILD_DIR="$ROOT/apk-build"
 SRC_WEB="$ROOT/bud-zdorov"

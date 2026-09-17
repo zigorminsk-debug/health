@@ -3064,7 +3064,7 @@
   })();
 
   // ---------- OCR lab analysis from photo (Tesseract.js, lazy-load) ----------
-  const OCR = { worker:null, busy:false };
+  const OCR = { worker:null, busy:false, expected:null, undo:[] };
   // ---------- Lightbox for OCR preview thumbnails (pinch/zoom/pan on touch, wheel on desktop) ----------
   let _ocrLb = null;
   function openOcrLightbox(src, allUrls){
@@ -3190,6 +3190,9 @@
       preview.innerHTML='';
       const oldDbg=document.getElementById('ocrRawText');
       if(oldDbg) oldDbg.remove();
+      const oldRev=document.getElementById('ocrReview');
+      if(oldRev) oldRev.remove();
+      OCR.undo.length=0;
       if(cancelBtn) cancelBtn.style.display='none';
       if(clearBtn) clearBtn.style.display='none';
       if(status) status.textContent='Выберите фото — бланк с анализами (сфотографируйте или из галереи).';
@@ -3228,9 +3231,12 @@
     }
   }
   // ---------- Pre-process photo for better OCR ----------
-  // Minimal: resize + grayscale + contrast stretch. Clean printed tables read better WITHOUT
-  // binarization/sharpen — those produce edge artifacts that Tesseract reads as garbage letters.
-  function preprocessImageForOCR(source){
+  // mode='gray' (по умолчанию): resize + grayscale + растяжка контраста — оптимально для
+  //   чистых СКАНОВ бланков (бинаризация на скане только вредит: рвёт запятые/точки).
+  // mode='otsu': дополнительно глобальная бинаризация по Отсу — для ФОТО с тенями,
+  //   желтизной и неровной засветкой (рекомендация Tesseract: Otsu/adaptive для «шумного» фона).
+  // Оба варианта прогоняются через OCR, выбирается лучший по уверенности — см. ocrAtAngle().
+  function preprocessImageForOCR(source, mode){
     // Accept HTMLImageElement or canvas; treat canvas as already-resized at correct dims
     const isCanvas = !!(source && source.getContext);
     let w, h, sx, sy;
@@ -3268,6 +3274,23 @@
       lut[i]=v;
     }
     for(let i=0;i<d.length;i+=4) d[i]=d[i+1]=d[i+2]=lut[d[i]];
+    if(mode==='otsu'){
+      // Порог Отсу: максимизируем межклассовую дисперсию «фон / текст»
+      const h2=new Uint32Array(256);
+      for(let i=0;i<d.length;i+=4) h2[d[i]]++;
+      const tot=d.length/4;
+      let sum=0; for(let i=0;i<256;i++) sum+=i*h2[i];
+      let sumB=0, wB=0, maxVar=-1, thr=127;
+      for(let i=0;i<256;i++){
+        wB+=h2[i]; if(!wB) continue;
+        const wF=tot-wB; if(!wF) break;
+        sumB+=i*h2[i];
+        const mB=sumB/wB, mF=(sum-sumB)/wF;
+        const v=wB*wF*(mB-mF)*(mB-mF);
+        if(v>maxVar){ maxVar=v; thr=i; }
+      }
+      for(let i=0;i<d.length;i+=4){ const v=d[i]>thr?255:0; d[i]=d[i+1]=d[i+2]=v; }
+    }
     ctx.putImageData(imgd,0,0);
     return c.toDataURL('image/png'); // lossless so commas/dots aren't JPEG-blurred
   }
@@ -3327,13 +3350,81 @@
     ctx.restore();
     return c;
   }
+  // Tesseract.js v5 отдаёт иерархию blocks→paragraphs→lines→words (в старых сборках — готовый
+  // data.words). Собираем слова с bounding box и confidence в формат движка js/ocr-engine.js:
+  // именно геометрия+уверенность отличают специализированные сервисы (Textract/Document AI)
+  // от «просто текста».
+  function wordsFromTessData(data){
+    const out=[];
+    const pushWord = w=>{
+      if(!w || typeof w.text!=='string') return;
+      const t=w.text.trim(); if(!t) return;
+      const b=w.bbox||{};
+      if(typeof b.x0!=='number' || typeof b.y0!=='number') return;
+      out.push({ text:t, bbox:{x0:b.x0, y0:b.y0, x1:b.x1, y1:b.y1},
+                 confidence: typeof w.confidence==='number' ? w.confidence : 90 });
+    };
+    if(data && Array.isArray(data.words) && data.words.length){ data.words.forEach(pushWord); return out; }
+    const walk = node=>{
+      if(!node) return;
+      if(Array.isArray(node)){ node.forEach(walk); return; }
+      if(Array.isArray(node.words)){ node.words.forEach(pushWord); return; }
+      walk(node.paragraphs); walk(node.lines); walk(node.blocks);
+    };
+    walk(data && data.blocks);
+    if(!out.length && data && Array.isArray(data.lines)) data.lines.forEach(l=>(l.words||[]).forEach(pushWord));
+    return out;
+  }
+  function cleanOcrText(raw){
+    let text = String(raw||'').replace(/\r/g,'\n').replace(/ё/g,'е').replace(/Ё/g,'Е');
+    text = text.replace(/[.·•…_\-]{2,}/g,' ');
+    text = text.replace(/[|Iіl]{1,3}(?=[0-9])/g,'1');
+    text = text.replace(/(?<=[0-9])[оО](?=[0-9])/g,'0');
+    return text;
+  }
+  // Оценка качества прохода OCR: уверенность слов (особенно числовых) + наличие имен показателей.
+  const OCR_NAME_RE = /гемоглобин|эритроцит|лейкоцит|тромбоцит|гематокрит|глюкоз|креатинин|мочевин|билирубин|холестерин|алт|аст|ттг|белок|калий|натрий|железо|ферритин|референ|результат|показатель/g;
+  function ocrPassScore(words, text){
+    if(!words || !words.length) return -1;
+    const nums = words.filter(w=>/[0-9]/.test(w.text));
+    let sum=0; for(const w of words) sum += (typeof w.confidence==='number'?w.confidence:0);
+    const meanConf = sum/words.length;
+    let nsum=0; for(const w of nums) nsum += (typeof w.confidence==='number'?w.confidence:0);
+    const numConf = nums.length? nsum/nums.length : 0;
+    const hits = ((text||'').toLowerCase().match(OCR_NAME_RE)||[]).length;
+    return { score: 0.55*meanConf + 0.35*numConf + Math.min(hits,12)*1.2 + Math.min(nums.length,40)*0.2,
+             meanConf, nums: nums.length };
+  }
+  // Один поворот + (при необходимости) два варианта препроцессинга: ч/б-растяжка и Otsu.
+  // Второй проход делается ТОЛЬКО если первый неуверенный — экономим время на телефоне.
+  async function ocrAtAngle(orig, angle, worker, status){
+    const rotated = renderRotated(orig, angle, 1800);
+    const modes = ['gray','otsu'];
+    let best=null;
+    for(const mode of modes){
+      if(status) status.innerHTML = (mode==='otsu'?'🔍 Распознаю (улучшенный режим)...':'🔍 Распознаю...')+' <span id="ocrProg"></span>';
+      const cleaned = preprocessImageForOCR(rotated, mode);
+      let data;
+      try{ data = (await worker.recognize(cleaned)).data; }catch(e){ continue; }
+      const words = wordsFromTessData(data);
+      const text = cleanOcrText(data.text||'');
+      const q = ocrPassScore(words, text);
+      const cand = { mode, words, text, score:q.score, meanConf:q.meanConf, nums:q.nums };
+      if(!best || cand.score > best.score) best = cand;
+      // проход достаточно хороший — второй не нужен
+      if(mode==='gray' && best.meanConf>=78 && best.nums>=3) break;
+    }
+    if(!best) return { text:'', words:[], meanConf:0, mode:'gray' };
+    return best;
+  }
   // Robust rotation detection for LAB FORMS: try ALL 4 rotations with real Tesseract OCR
-  // on a medium-size image (1100px) and pick the rotation that matches the most lab test
+  // on a medium-size image (900px — достаточно для ключевых слов и вдвое быстрее, чем 1100px)
+  // and pick the rotation that matches the most lab test
   // keywords AND contains the most decimal numbers (like 4,87 / 154 / 34,4).
   // This works on Sysmex/Invitro/Helix forms where column headers are printed vertically
   // and the page may be rotated 90° in either direction, or upside-down.
   async function detectOrientation(img, worker){
-    const sampleW = 1100;
+    const sampleW = 900;
     const angles=[0,90,180,270];
     const KEYWORDS = /гемоглобин|эритроцит|лейкоцит|тромбоцит|гематокрит|ретикулоцит|лимфоцит|моноцит|эозинофил|базофил|нейтрофил|палочкоядер|сегменто|свертываем|фибриноген|ачтв|протромбин|тромбинов|мочевин|креатинин|билирубин|глюкоз|холестерин|алт|аст|щелочная|ггтп|лдг|кфк|амилаза|альбумин|общий белок|калий|натрий|кальций|магний|фосфор|железо|ттг|т4|т3|витамин|с-реактив|показатель|результат|исследов|референ|единиц|женщин|мужчин|фамил|отделен|дата|анализатор|сыворот|лейкоцитарн/i;
     let best=0, bestScore=-1;
@@ -3370,21 +3461,13 @@
     let angle;
     try{ angle = await detectOrientation(orig, worker); }catch(e){ angle = detectBestRotation(orig, {mode:'lab'}); }
     if(status) status.innerHTML='🔍 Распознаю... <span id="ocrProg"></span>';
-    // Render rotated full-size and preprocess
-    const rotated = renderRotated(orig, angle, 1800);
-    const cleaned = preprocessImageForOCR(rotated);
-    const { data } = await worker.recognize(cleaned);
-    let text = (data.text||'').replace(/\r/g,'\n');
-    text = text.replace(/ё/g,'е').replace(/Ё/g,'Е');
-    // Collapse leader dots/dashes between name and value to a single space
-    text = text.replace(/[.·•…_\-]{2,}/g,' ');
-    // Common OCR substitutions
-    text = text.replace(/[|Iіl]{1,3}(?=[0-9])/g,'1');
-    text = text.replace(/(?<=[0-9])[оО](?=[0-9])/g,'0');
+    // Распознавание: возвращает и ТЕКСТ, и СЛОВА с координатами+уверенностью (для движка v2)
+    const pass = await ocrAtAngle(orig, angle, worker, status);
+    const text = pass.text;
     // Build a thumbnail already rotated to correct orientation for preview
     const thumbCvs = renderRotated(orig, angle, 600);
     const thumbUrl = thumbCvs.toDataURL('image/jpeg', 0.82);
-    return {text, angle, thumbUrl};
+    return {text, angle, thumbUrl, words:pass.words, meanConf:pass.meanConf, mode:pass.mode};
   }
   async function runOCR(files, status, cancelBtn, preview, clearBtn){
     if(OCR.busy){ if(status)status.textContent='Идёт другое распознавание, подождите...'; return; }
@@ -3412,32 +3495,23 @@
         displayUrls.push(u);
       }
       const ocrAngles = new Array(urls.length).fill(0); // manual-rotation delta for each photo
+      const reviewItems = [];                           // значения «под вопросом» — панель проверки
       async function rerunAtAngle(i, delta){
         if(OCR.busy){ status.textContent='Идёт распознавание, подождите...'; return; }
         ocrAngles[i] = (ocrAngles[i] + delta + 360) % 360;
         status.innerHTML='🔄 Поворачиваю фото '+(i+1)+' на '+Math.abs(delta)+'° и распознаю заново...';
         try{
           const orig = await loadImageFromUrl(urls[i]);
-          // Build rotated canvas at user angle + heuristic best for that image
           const forced = ocrAngles[i];
-          const rot = renderRotated(orig, forced, 1800);
-          // Re-do OCR on this rotated image
           const worker = await getTessWorker(status);
-          const cleaned = preprocessImageForOCR(rot);
-          const {data} = await worker.recognize(cleaned);
-          let text = (data.text||'').replace(/\r/g,'\n').replace(/ё/g,'е').replace(/Ё/g,'Е');
-          text = text.replace(/[.·•…_\-]{2,}/g,' ');
-          text = text.replace(/[|Iіl]{1,3}(?=[0-9])/g,'1');
-          text = text.replace(/(?<=[0-9])[оО](?=[0-9])/g,'0');
+          // тот же конвейер, что и в основном проходе: 2 варианта препроцессинга + слова с bbox
+          const pass = await ocrAtAngle(orig, forced, worker, status);
+          const text = pass.text;
           const thumbCvs = renderRotated(orig, forced, 600);
           displayUrls[i] = thumbCvs.toDataURL('image/jpeg',0.82);
-          // Clear previously filled values from THIS photo's hits (we re-parse fresh)
-          // — simpler: do NOT clear; just add new matches on top.
-          let parseText = text.replace(/\s*[↑↓↔▲▼]\s*/g,' ')
-            .replace(/[ \t]*([.\u00B7\u2022·•*\-–—]{2,}|\.(\s+\.){1,})[ \t]*/g,' ')
-            .replace(/[ \t]+/g,' ');
-          parseText = parseText.replace(/\bн\s*\/\s*о\b/gi,' 0 н/о');
-          const filled = fillAnalysesFromText(parseText, {lineByLine:true});
+          // Ранее заполненные этим фото значения не стираем — новые совпадения их перезапишут.
+          const filled = fillAnalysesFromText(text, {lineByLine:true, words:pass.words, review:reviewItems, src:'фото '+(i+1)+' (поворот '+forced+'°)'});
+          renderOcrReview(reviewItems);
           // Update raw text box
           const dbg=document.getElementById('ocrRawText');
           if(dbg){
@@ -3500,13 +3574,10 @@
           const text = res.text;
           displayUrls[i] = res.thumbUrl;
           renderThumbs();
-          totalText += '\n\n=== фото '+(i+1)+' (поворот '+res.angle+'°) ===\n'+text;
-          let parseText = text
-            .replace(/\s*[↑↓↔▲▼]\s*/g, ' ')
-            .replace(/[ \t]*([.\u00B7\u2022·•*\-–—]{2,}|\.(\s+\.){1,})[ \t]*/g, ' ')
-            .replace(/[ \t]+/g,' ');
-          parseText = parseText.replace(/\bн\s*\/\s*о\b/gi,' 0 н/о');
-          const filled = fillAnalysesFromText(parseText, {lineByLine:true});
+          totalText += '\n\n=== фото '+(i+1)+' (поворот '+res.angle+'°, режим '+(res.mode||'gray')+', уверенность '+Math.round(res.meanConf||0)+'%) ===\n'+text;
+          // Движок v2: разбираем СЛОВА с координатами (таблица бланка), текст — только fallback
+          const filled = fillAnalysesFromText(text, {lineByLine:true, words:res.words, review:reviewItems, src:'фото '+(i+1)});
+          renderOcrReview(reviewItems);
           totalFilled += filled;
           if(preview){
             const imgs=preview.querySelectorAll('img');
@@ -3532,8 +3603,11 @@
         preview.parentNode.appendChild(dbg);
       }
       if(dbg) dbg.querySelector('pre').textContent=totalText;
+      const needCheck = reviewItems.filter(it=>!it.written).length;
       if(!cancelled){
-        if(status) status.innerHTML = `✅ Готово. Обработано фото: <b>${urls.length}</b>, заполнено/обновлено полей: <b style="color:#2e7d32;font-size:16px">${totalFilled}</b>. Проверьте значения перед сохранением — OCR может ошибаться. <b>Обязательно сверьте с бумажным бланком.</b>`;
+        if(status) status.innerHTML = `✅ Готово. Обработано фото: <b>${urls.length}</b>, заполнено/обновлено полей: <b style="color:#2e7d32;font-size:16px">${totalFilled}</b>.` +
+          (needCheck? ` Сомнительных значений: <b style="color:#b26a00">${needCheck}</b> — подтвердите их в списке ниже.` : '') +
+          ` Проверьте значения перед сохранением — OCR может ошибаться. <b>Обязательно сверьте с бумажным бланком.</b>`;
       }
     } catch(e){
       console.error(e);
@@ -3551,305 +3625,193 @@
       document.head.appendChild(s);
     });
   }
-  // Map OCR text → analysis fields by keyword matching
+  // ================================================================
+  //  Автозаполнение полей из OCR — движок v2 (js/ocr-engine.js)
+  //  Работаем по принципам специализированных сервисов распознавания
+  //  бланков (AWS Textract, Azure Document Intelligence, Google Document AI):
+  //   1. LAYOUT-АНАЛИЗ: слова OCR имеют координаты (bounding box). Движок
+  //      группирует их в строки таблицы по Y и в ячейки по X-зазорам, поэтому
+  //      имя показателя и его результат связываются ГЕОМЕТРИЕЙ одной строки,
+  //      а не поиском «первого числа в окне 120 символов» (главная причина
+  //      ошибок старой версии: вместо 4,9 подставлялось 9 из «10^9/л»).
+  //   2. CONFIDENCE: у каждого значения есть уверенность OCR. Уверенные (≥60%)
+  //      вписываются сразу, сомнительные попадают в панель проверки — правило
+  //      «human in the loop» из документации Textract.
+  //   3. ВАЛИДАЦИЯ: сверка с физиологическими границами показателя; десятичная
+  //      запятая НЕ придумывается (сдвиг — только когда целое невозможно);
+  //      колонка референсов никогда не принимается за результат.
+  //   4. ЕДИНИЦЫ: г/дл → г/л, мг/дл → ммоль/л и т.п. автоматически.
+  // ================================================================
+  function ocrExpected(){
+    if(!window.OCREngine || typeof ANALYSIS_GROUPS==='undefined') return null;
+    if(!OCR.expected) OCR.expected = window.OCREngine.buildExpected(ANALYSIS_GROUPS);
+    return OCR.expected;
+  }
+  function testLabel(testId){
+    if(typeof ANALYSIS_GROUPS!=='undefined'){
+      for(const g of ANALYSIS_GROUPS) for(const t of (g.tests||[])){
+        if(t && t.id===testId) return t.name || testId;
+      }
+    }
+    return testId;
+  }
+  function testInput(testId){
+    return document.querySelector('.test-row[data-test="'+testId+'"] .test-input');
+  }
+  function writeTestValue(testId, val){
+    if(val==null || isNaN(val)) return false;
+    const inp = testInput(testId);
+    if(!inp) return false;
+    // ВАЖНО: поля у нас <input type="number" step="any">, а такой тип принимает ТОЛЬКО точку
+    // как десятичный разделитель — строка «4,9» браузером отбрасывается и поле остаётся ПУСТЫМ.
+    // Именно поэтому прежняя версия «теряла» все дробные значения (4,9 / 0,45 / 9,5).
+    const tag = inp.tagName;
+    const isNumber = tag==='INPUT' && ((inp.getAttribute('type')||'').toLowerCase()==='number' || inp.getAttribute('data-type')==='number');
+    if(tag==='SELECT'){
+      // качественные поля (списки) — пишем, только если такой вариант реально есть
+      const want = [String(val), String(val).replace('.',',')];
+      const opt = Array.from(inp.options||[]).find(o=>want.indexOf(o.value)>=0 || want.indexOf((o.textContent||'').trim())>=0);
+      if(!opt) return false;
+      inp.value = opt.value;
+    } else {
+      inp.value = isNumber ? String(val) : String(val).replace('.',',');
+    }
+    try{
+      const r = inp.closest('.test-row');
+      const group = ANALYSIS_GROUPS.find(g=>r && r.getAttribute('data-group')===g.id);
+      const t2 = group && group.tests.find(tt=>tt.id===testId);
+      if(group && t2) evaluateRow(group,t2,r);
+    }catch(e){}
+    return true;
+  }
+  function fmtOcrVal(v){ return String(v).replace('.',','); }
+
+  // Основная точка входа: text — сырой текст OCR, opts.words — слова с координатами.
   function fillAnalysesFromText(text, opts){
-    opts = opts||{};
-    const lineByLine = !!opts.lineByLine;
-    // Normalize spaces but PRESERVE newlines for line-by-line mode
-    const norm = s => String(s||'').toLowerCase().replace(/ё/g,'е').replace(/[^а-яa-z0-9]/g,'');
-    // Collapse runs of spaces/tabs but keep \n as line separator
-    let t0 = String(text||'').toLowerCase().replace(/ё/g,'е').replace(/\r/g,'\n').replace(/[ \t\xA0]+/g,' ');
-    t0 = t0.replace(/\n{2,}/g,'\n').replace(/^[ \n]+|[ \n]+$/g,'');
-    const t = ' '+t0.replace(/\n/g,' ')+' '; // global space-only version for fallback
-    let filled=0;
-    // Aliases: normalized-name -> array of (raw regex) tokens to look for. Sorted longest-first for safety.
-    // Keys are normalized version of what we'll match against test names.
-    const aliases = [
-      // Coagulation (top of user's Sysmex form: АЧТВ, ПВ, ПВ Ratio, % протромб.комплекса, МНО, Фибриноген по Клаусу)
-      { ids:['aptt'], names:['ачтв ratio','ачтв','аптв','ахтв','активированное частичное тромбопластиновое','ptt','aptt'] },
-      { ids:['pti'], names:['% активности протромбинового комплекса','протромбинового комплекса','активности протромбинового','% протромбина по квику','% по квику','prothrombin index','пти','pti'] },
-      { ids:['pt'], names:['пв ratio','pb ratio','пр ratio','prothrombin ratio','prothrombin time','pt ratio','протромбиновое время','пв ','мно','mho','инр','inr'] },
-      { ids:['fib'], names:['фибриноген по клаусу','фибриноген','fibrinogen','фбг'] },
-      { ids:['tt'], names:['тромбиновое время','тв ','thrombin time'] },
-      { ids:['dimer'], names:['д-димер','d-dimer','д димер'] },
-      // CBC (Sysmex layout)
-      { ids:['hgb'], names:['гемоглобин','hemoglobin','hgb','hb ','гб '] },
-      { ids:['rbc'], names:['эритроциты','erythrocyte','rbc','red blood','эр.'] },
-      { ids:['wbc'], names:['лейкоциты','leukocyte','leukocyt','wbc','лейк.'] },
-      { ids:['plt'], names:['тромбоциты','platelet','plt','тромб.'] },
-      { ids:['hct'], names:['гематокрит','hematocrit','hct','ht'] },
-      { ids:['mcv'], names:['mcv','средний объём эритроцита'] },
-      { ids:['mch'], names:['mch ','мсн ','среднее содержание hb','среднее содержание гемоглобина'] },
-      { ids:['mchc'], names:['mchc','мснс','средняя концентрация hb','средняя концентрация гемоглобина'] },
-      { ids:['rdw'], names:['rdw','ширина распределения эритроцитов','rdw-cv'] },
-      { ids:['esr'], names:['соэ','esr','скорость оседания'] },
-      // Leukocyte formula: "(кач)" = %, "(кол)" = ×10⁹/л (Sysmex forms)
-      { ids:['baso'], names:['базофилы (кач)','базофилы,%','базофилы, %','базофилы кач','basophils %'] },
-      { ids:['baso_abs'], names:['базофилы (кол)','базофилы кол','базофилы, 10','basophils absolute','абс. базофилы'] },
-      { ids:['eo'], names:['эозинофилы (кач)','эозинофилы,%','эозинофилы, %','эозинофилы кач','eosinophil %','эозинофилы,'] },
-      { ids:['eos_abs'], names:['эозинофилы (кол)','эозинофилы кол','эозинофилы, 10','eosinophil absolute','абс. эозинофилы'] },
-      { ids:['neut'], names:['нейтрофилы (кач)','нейтрофилы,%','нейтрофилы, %','нейтрофилы кач','сегментоядерные нейтрофилы','neutrophil %','нейтрофилы общие'] },
-      { ids:['neut_abs'], names:['нейтрофилы (кол)','нейтрофилы кол','нейтрофилы, 10','нейтрофилы абс','neutrophil absolute','абс. нейтрофилы'] },
-      { ids:['lym'], names:['лимфоциты (кач)','лимфоциты,%','лимфоциты, %','лимфоциты кач','lymphocyte %','лимфоциты,'] },
-      { ids:['lym_abs'], names:['лимфоциты (кол)','лимфоциты кол','лимфоциты, 10','лимфоциты абс','lymphocyte absolute','абс. лимфоциты'] },
-      { ids:['mono'], names:['моноциты (кач)','моноциты,%','моноциты, %','моноциты кач','monocyte %','моноциты,'] },
-      { ids:['mono_abs'], names:['моноциты (кол)','моноциты кол','моноциты, 10','моноциты абс','monocyte absolute','абс. моноциты'] },
-      { ids:['band'], names:['палочкоядерные','палочкоядер','band neut','band form','сдвиг влево'] },
-      { ids:['meta'], names:['незрелые гранулоциты','metamyelocyte','метамиелоциты','юные нейтрофилы','миелоциты','юные гранулоциты'] },
-      // Biochemistry
-      { ids:['glu'], names:['глюкоза','глюк','glucose','сахар в крови','сахар крови'] },
-      { ids:['chol'], names:['холестерин общий','общий холестерин','общ. холестерин','холестерол','cholesterol total','total chol'] },
-      { ids:['ldl'], names:['лпнп','лнп','ldl','липопротеины низкой плотности','холестерин лпнп','холестерин лнп'] },
-      { ids:['hdl'], names:['лпвп','лвп','hdl','липопротеины высокой плотности','холестерин лпвп','холестерин лвп'] },
-      { ids:['tg'], names:['триглицериды','триглицерид','трлг','tg','triglyceride'] },
-      { ids:['creat'], names:['креатинин','creatinine','креат.'] },
-      { ids:['urea'], names:['мочевина','urea','bun'] },
-      { ids:['ua'], names:['мочевая кислота','uric acid','урическая к-та','uric','мочевой кислоты'] },
-      { ids:['bili_total'], names:['билирубин общий','общий билирубин','bilirubin total','общ. билируб'] },
-      { ids:['bili_dir'], names:['билирубин прямой','прямой билирубин','bilirubin direct','связанный билируб','конъюгирован'] },
-      { ids:['alt'], names:['алт','аланин','алат','alt','аланинаминотрансфер'] },
-      { ids:['ast'], names:['аст','аспартат','асат','ast','аспартатаминотрансфер'] },
-      { ids:['alp'], names:['щелочная фосфатаза','щф','alp','alkaline phosph'] },
-      { ids:['ggt'], names:['гамма-гт','гаммагт','ггт','ггтп','ggt','gamma glutamyl','γ-гт'] },
-      { ids:['ldh'], names:['лдг','лдг','лактатдегидрогеназа','ldh','лактатдегидроген'] },
-      { ids:['ck'], names:['кфк','креатинфосфокиназа','креатинкиназа','ck','креатин киназа'] },
-      { ids:['amyl'], names:['альфа амилаза','альфа-амилаза','амилаза общая','амилаза','amylase',' α-амилаза','αамилаза','панкреатическая амилаза'] },
-      { ids:['tprot'], names:['общий белок','total protein','общ. белок'] },
-      { ids:['alb'], names:['альбумин','albumin'] },
-      { ids:['fe'], names:['железо сывороточное','сывороточное железо','железо,','serum iron',' fe ','железо сыв'] },
-      { ids:['cl'], names:['хлор','хлориды','chloride',' cl ','хлор сыворот'] },
-      { ids:['ferritin'], names:['ферритин','ferritin'] },
-      { ids:['crp'], names:['с-реактивный белок','срб','c-реактив','crp','c-reactive','с реактив'] },
-      // Hormones
-      { ids:['tsh'], names:['ттг','tsh','тиреотропный гормон','тиреотропн'] },
-      { ids:['ft4'], names:['т4 св','т4 свободный','свободный т4','free t4','ft4','тироксин свободный'] },
-      { ids:['ft3'], names:['т3 св','т3 свободный','свободный т3','free t3','ft3','трийодтиронин свобод'] },
-      { ids:['atpo'], names:['ат-тпо','ат к тпо','антитела к тпо','анти тпо','anti-tpo','аттпо','анти-тпо'] },
-      // Vitamins/elements
-      { ids:['vitd'], names:['25(он)d','25-он d','25 он d','25(oh)d','25-hydroxyvitamin','витамин д','витамин d','25-гидрокси'] },
-      { ids:['vitb12'], names:['витамин в12','цианокобаламин','в12','vitamin b12','cobalamin','b12'] },
-      { ids:['vitb9'], names:['фолиевая кислота','фолат','folic acid','folate','в9','vitamin b9'] },
-      { ids:['k'], names:['калий','kalium','k+',' к ','сывороточный калий'] },
-      { ids:['na'], names:['натрий','natrium','na+',' na ','сывороточный натрий'] },
-      { ids:['ca'], names:['кальций общий','общий кальций','calcium total','общ. кальций',' ca ','кальций,'] },
-      { ids:['mg'], names:['магний','magnesium',' mg','сывороточный магний'] },
-      { ids:['phos'], names:['фосфор неорганический','фосфор,','неорганический фосфор','р неорг','phosphorus','сывороточный фосфор'] },
-      { ids:['zn'], names:['цинк','zinc',' zn'] },
-      // Cardiac
-      { ids:['troponin'], names:['тропонин','troponin','high-sensitivity troponin','тропонин i','тропонин т'] },
-      { ids:['bnp'], names:['нбп','bnp','nt-probnp','probnp','натрийуретический пептид','мозговой натрийуретический'] },
-      // Urinalysis
-      { ids:['u_prot'], names:['белок в моче','urine protein','белок мочи','protein urine','белок, моча'] },
-      { ids:['u_glu'], names:['глюкоза мочи','сахар мочи','глюкозурия','glucose urine'] },
-      { ids:['u_leu'], names:['лейкоциты мочи','лейкоцитурия','wbc urine','лейкоциты в моче'] },
-      { ids:['u_bld'], names:['эритроциты мочи','гематурия','rbc urine','эритроциты в моче','кровь в моче'] },
-      { ids:['u_dens'], names:['относительная плотность','плотность мочи','удельный вес','urine density','относ плотност'] },
-      { ids:['u_ph'], names:['реакция мочи',' ph ','рh мочи','ph мочи'] },
-      { ids:['u_epi'], names:['эпителий плоский','плоский эпителий'] },
-    ];
-    // Find the first number after a keyword position, allowing long leader dots/spaces/arrows
-    function pickTidAndVal(haystack, pos, a){
-      // Try ids in order: prefer ids that have an expected range defined for higher accuracy,
-      // then fall back to first id. Once a val is found with expected range, write to ALL ids of this alias.
-      let val=null, usedTid=a.ids[0];
-      const withRange = a.ids.filter(id=>EXPECTED[id]);
-      const order = withRange.length? withRange : a.ids;
-      for(const tid of order){
-        const v = findNumberForTest(haystack, pos, tid);
-        if(v!=null && !isNaN(v) && v>0 && v<100000){
-          val=v; usedTid=tid; break;
-        }
-      }
-      if(val==null) return null;
-      return val;
+    opts = opts || {};
+    const expected = ocrExpected();
+    if(!window.OCREngine || !expected){
+      console.warn('OCR-движок (js/ocr-engine.js) не загружен — автозаполнение недоступно');
+      return 0;
     }
-    function locateKeyIn(haystack, keyPhrase){
-      const key = norm(keyPhrase);
-      if(!key) return -1;
-      const nt=[], pm=[];
-      for(let i=0;i<haystack.length;i++){
-        const ch=haystack[i];
-        if(/[а-яa-z0-9ё]/i.test(ch)){ nt.push(ch.toLowerCase().replace('ё','е')); pm.push(i); }
-      }
-      const nts=nt.join('');
-      let idx = nts.indexOf(key);
-      if(idx<0 && key.length>=5) idx = nts.indexOf(key.slice(0,5));
-      if(idx<0) return -1;
-      return pm[idx];
-    }
-    function locateKey(keyPhrase){ return locateKeyIn(t, keyPhrase); }
-    function writeTestValue(testId, val){
-      if(val==null||isNaN(val)) return false;
-      // Find input matching this test id
-      const row = document.querySelector(`.test-row[data-test="${testId}"] .test-input`);
-      if(!row) return false;
-      row.value = String(val).replace('.',',');
-      try{
-        const r=row.closest('.test-row');
-        const group = ANALYSIS_GROUPS.find(g=>r && r.getAttribute('data-group')===g.id);
-        const t2 = group && group.tests.find(tt=>tt.id===testId);
-        if(group && t2) evaluateRow(group,t2,r);
-      }catch(e){}
-      return true;
-    }
-    // ---- Build expected value range per test id from ANALYSIS_GROUPS (with generous margin) ----
-    const EXPECTED = (()=>{
-      const out={};
-      if(typeof ANALYSIS_GROUPS==='undefined') return out;
-      for(const g of ANALYSIS_GROUPS) for(const tt of (g.tests||[])){
-        if(!tt || !tt.id || !tt.ranges) continue;
-        let lo=Infinity, hi=-Infinity;
-        for(const k of Object.keys(tt.ranges)){
-          const r=tt.ranges[k];
-          if(Array.isArray(r) && r.length===2){
-            if(r[0]<lo) lo=r[0];
-            if(r[1]>hi) hi=r[1];
-          }
-        }
-        if(isFinite(lo) && isFinite(hi)){
-          // Allow wide margin: from lo/50 to hi*20 for decimal shifts; for very big numbers also allow
-          // missing-comma X→X,XX only within plausible human lab ranges.
-          const margin = Math.max(hi*1.5, lo*0.5);
-          out[tt.id] = { lo: Math.max(0, lo*0.3), hi: Math.min(1e7, hi*5) };
-          // "human" range is what a real value of this test can be, with no OCR errors possible
-          out[tt.id].human = { lo: Math.max(0, lo*0.4), hi: hi*3 };
-        }
-      }
-      return out;
-    })();
-    // Extract ALL candidate numbers from a segment, with their position and also with a
-    // "comma-shifted" variant (e.g. 489 → 4.89, 664 → 6.64, 2120 → 2.120, 111 → 11.1).
-    // Candidates are objects {value, isFirstAfterUnit, start, end}.
-    function extractCandidates(segment){
-      const NUM_RE=/(\d+)(?:[.,·:\/](\d{1,3}))?/g;
-      const SCALE_AFTER=/^\s{0,3}[°\^º0-9⁰¹²³⁴⁵⁶⁷⁸⁹·.\-*/]*(л|г|е|е\/л|u\/l|fl|pg|кл|клет|клв)/i;
-      const UNIT_AFTER=/^\s{0,3}(г\/л|мг\/л|мг\/дл|мкг\/л|мкмоль\/л|ммоль\/л|моль\/л|ед\/л|е\/л|мкме\/мл|нг\/мл|мкг\/мл|%|сек|фл|пг|мке)|^\s{0,3}[гмлнстфпμ%](\s*[/\/°^º0-9а-яёa-z])|^\s{0,3}(мг|мкг|мкм|мм|нг|ед|е|кл)(\s*[/\/°^º0-9а-яёa-z])/i;
-      const out=[];
-      let m;
-      while((m=NUM_RE.exec(segment))!==null){
-        const intp=m[1], frac=m[2];
-        const start=m.index, end=m.index+m[0].length;
-        const raw = parseFloat(intp+'.'+(frac||'0'));
-        const after = segment.substr(end,25);
-        const isScale = (raw===10||raw===100||raw===1000) && SCALE_AFTER.test(after);
-        const isUnit = UNIT_AFTER.test(after);
-        if(isScale) continue;
-        // base candidate (as read)
-        out.push({value:raw, isUnitAfter:isUnit, start, end, shifted:false});
-        // also generate shifted variants (missing comma) for integers, several positions
-        if(!frac){
-          // variants: comma after 1st digit (489→4.89), after 2nd (489→48.9)
-          for(let cut=1; cut<intp.length; cut++){
-            const v = parseFloat(intp.slice(0,cut)+'.'+intp.slice(cut));
-            if(v>0 && v<10000) out.push({value:v, isUnitAfter:isUnit, start, end, shifted:true});
-          }
-        }
-      }
-      return out;
-    }
-    // Given keyword position and target test id, pick the best-matching number candidate using
-    // expected range. Algorithm:
-    //   1. Collect all numeric candidates after the keyword (within window).
-    //   2. Skip candidates that are a UNIT SCALE ("10" in "10°л", "10^9/л").
-    //   3. Score each candidate by how close it is to the expected range, and by whether a unit
-    //      word appears immediately after (high signal).
-    //   4. Also skip candidates that look like reference-range values (after a unit, between two numbers with dash).
-    function findNumberForTest(haystack, startPos, testId){
-      const exp = EXPECTED[testId];
-      const end = Math.min(haystack.length, startPos+120);
-      const segment = haystack.slice(startPos, end);
-      let cands = extractCandidates(segment);
-      // If there's a Cyrillic word (3+ letters, not a unit) after some candidate, cut the list there.
-      let cutIdx = cands.length;
-      const after0 = segment;
-      for(let i=0;i<cands.length;i++){
-        const tail = segment.slice(cands[i].end);
-        const m = tail.match(/^[\s.·•*_=:0-9,·:\/\-–—]*([а-яА-ЯёЁa-zA-Z]{3,})/);
-        if(m){
-          const word = m[1];
-          if(!/^(мг|мкг|мкм|мм|нг|ед|мке|кл|г|л|мл|сек|фл|пг|кач|кол)$/i.test(word)){
-            cutIdx = i+1; break;
-          }
-        }
-      }
-      cands = cands.slice(0,cutIdx);
-      // If expected range is known, prefer candidates inside range; then candidates near range.
-      if(exp){
-        // Score: lower is better. in-human-range with unit after → score 0.
-        let best=null, bestScore=Infinity;
-        for(let i=0;i<cands.length;i++){
-          const c = cands[i];
-          let score;
-          const v = c.value;
-          if(v>=exp.human.lo && v<=exp.human.hi){
-            score = c.isUnitAfter ? 0 : 1;
-          } else if(v>=exp.lo && v<=exp.hi){
-            score = 3 + (c.isUnitAfter?0:1);
-          } else {
-            // far outside — heavy penalty unless shifted helps
-            score = 20 + Math.abs(Math.log10(Math.max(v,0.001)/((exp.human.lo+exp.human.hi)/2)));
-          }
-          // Slight preference for earlier candidates and non-shifted
-          score += i*0.3 + (c.shifted?0.5:0);
-          if(score<bestScore){ bestScore=score; best=c; }
-        }
-        if(best && bestScore<25) return best.value;
-      }
-      // Fallback: no expected range OR nothing fit — use first candidate with unit after, else first.
-      const withUnit = cands.find(c=>c.isUnitAfter);
-      if(withUnit) return withUnit.value;
-      return cands.length? cands[0].value : null;
-    }
+    const words = Array.isArray(opts.words) ? opts.words : null;
+    // Главный путь — геометрия слов; текст разбираем, только если координат нет
+    const items = (words && words.length)
+      ? window.OCREngine.parseFromWords(words, expected)
+      : window.OCREngine.parseFromText(String(text||''), expected);
+    return applyOcrItems(items, opts);
+  }
+
+  function applyOcrItems(items, opts){
+    let filled = 0;
+    const review = Array.isArray(opts.review) ? opts.review : null;
     const writtenIds = new Set();
-    // Phase 1: LINE-BY-LINE — each row of the form is one line. Name and value must be on the same line.
-    // This is the primary pass: it prevents values from one test being matched to a name several lines above.
-    if(lineByLine){
-      // STRICTLY top-to-bottom, one line = one row of the table.
-      // Per user requirement: results are ALWAYS on the same line as the name; never merge lines,
-      // never fall back to global search — that picks up wrong numbers from other rows.
-      let cleaned = t0
-        .replace(/[ \t]*([.\u00B7\u2022·•*\-–—]{2,}|\.(\s+\.){1,})[ \t]*/g, ' ')
-        .replace(/[ \t]+/g,' ').replace(/\n{2,}/g,'\n');
-      // Normalize arrows and noise
-      cleaned = cleaned.replace(/\s*[↑↓↔▲▼]\s*/g,' ');
-      const raw = cleaned.split('\n').map(l=>l.trim()).filter(l=>l.length>=3);
-      // Walk lines IN ORDER top to bottom. Once a test is matched on a line, we don't look at that alias again,
-      // and we don't backtrack to earlier lines.
-      for(const line of raw){
-        if(!/[0-9]/.test(line)) continue;           // skip lines with no numbers
-        const ln = norm(line);
-        if(ln.length<3) continue;
-        for(const a of aliases){
-          if(writtenIds.has(a.ids[0])) continue;
-          let found=false;
-          for(const name of a.names){
-            const key = norm(name);
-            if(!key) continue;
-            // Find key in this line (with position map)
-            const nt=[], pm=[];
-            for(let i=0;i<line.length;i++){
-              const ch=line[i];
-              if(/[а-яa-z0-9ё]/i.test(ch)){ nt.push(ch.toLowerCase().replace('ё','е')); pm.push(i); }
-            }
-            const nts=nt.join('');
-            let idx = nts.indexOf(key);
-            if(idx<0 && key.length>=5) idx = nts.indexOf(key.slice(0,5));
-            if(idx<0) continue;
-            const pos = pm[idx];
-            if(pos==null) continue;
-            const val = pickTidAndVal(line, pos, a);
-            if(val==null || isNaN(val) || val<=0 || val>10000) continue;
-            for(const tid of a.ids){
-              if(writeTestValue(tid,val)){ filled++; writtenIds.add(tid); writtenIds.add(a.ids[0]); found=true; break; }
-            }
-            if(found) break;
-          }
-          if(found) break;
-        }
+    for(const it of (items||[])){
+      if(!it || !it.alias || it.value==null) continue;
+      const ids = (it.alias.ids||[]).filter(id=>testInput(id));
+      if(!ids.length) continue;                       // такого поля в форме нет
+      if(writtenIds.has(ids[0])) continue;            // показатель уже обработан
+      const conf = typeof it.conf==='number' ? it.conf : 90;
+      const flags = it.flags || [];
+      const label = testLabel(ids[0]);
+      const notes = [];
+      if(flags.indexOf('shift')>=0)  notes.push('восстановлена десятичная запятая');
+      if(flags.indexOf('merged')>=0) notes.push('строка бланка была разорвана — склеена');
+      for(const f of flags) if(/^unit:/.test(f)) notes.push('единицы бланка «'+f.slice(5)+'» пересчитаны');
+      const needsReview = (conf < 60) || flags.indexOf('range')>=0;
+      if(needsReview){
+        const reasons = notes.slice();
+        if(conf < 60) reasons.unshift('низкая уверенность распознавания ('+Math.round(conf)+'%)');
+        if(flags.indexOf('range')>=0) reasons.unshift('значение вне физиологических границ');
+        if(review) review.push({ ids, label, value:it.value, conf, reasons, written:false, src:opts.src||'', raw:it.raw||'' });
+        continue;
       }
+      const prev = ids.map(id=>({ id, value:(testInput(id)||{}).value || '' }));
+      let ok=false;
+      for(const id of ids){ if(writeTestValue(id, it.value)){ ok=true; break; } }
+      if(!ok){
+        // поле есть, но значение в него не помещается (например, список качественных значений)
+        if(review) review.push({ ids, label, value:it.value, conf,
+          reasons:['не удалось вписать автоматически — тип поля не принимает такое значение'],
+          written:false, src:opts.src||'', raw:it.raw||'' });
+        continue;
+      }
+      filled++;
+      writtenIds.add(ids[0]);
+      OCR.undo.push(prev);
+      if(review) review.push({ ids, label, value:it.value, conf, reasons:notes, written:true, undo:prev, src:opts.src||'', raw:it.raw||'' });
     }
     return filled;
   }
+
+  // ---------- панель проверки распознанных значений ----------
+  function ensureReviewBox(){
+    let box = document.getElementById('ocrReview');
+    if(box) return box;
+    const preview = document.getElementById('ocrPreview');
+    if(!preview || !preview.parentNode) return null;
+    box = document.createElement('div');
+    box.id = 'ocrReview';
+    box.style.cssText = 'margin-top:8px;padding:8px;border:1px solid #e0d3b8;background:#fffaf0;border-radius:8px;font-size:13px';
+    box.style.display = 'none';
+    preview.parentNode.insertBefore(box, preview.nextSibling);
+    return box;
+  }
+  function restoreOcrUndo(prev){
+    (prev||[]).forEach(p=>{
+      const inp = testInput(p.id);
+      if(!inp) return;
+      inp.value = p.value;
+      try{
+        const r = inp.closest('.test-row');
+        const group = ANALYSIS_GROUPS.find(g=>r && r.getAttribute('data-group')===g.id);
+        const t2 = group && group.tests.find(tt=>tt.id===p.id);
+        if(group && t2) evaluateRow(group,t2,r);
+      }catch(e){}
+    });
+  }
+  function renderOcrReview(items){
+    const box = ensureReviewBox();
+    if(!box) return;
+    if(!items || !items.length){ box.style.display='none'; box.innerHTML=''; return; }
+    box.style.display='';
+    const bad = items.filter(it=>!it.written).length;
+    const rows = items.map((it,idx)=>{
+      const badge = it.written
+        ? '<span style="color:#2e7d32">✓ вписано</span>'
+        : '<span style="color:#b26a00">⚠ не вписано</span>';
+      const confTxt = (typeof it.conf==='number') ? ' <span style="color:#888">· уверенность '+Math.round(it.conf)+'%</span>' : '';
+      const why = (it.reasons && it.reasons.length)
+        ? '<div style="color:#777;font-size:11px;margin-top:2px">'+it.reasons.map(escHtml).join('; ')+'</div>' : '';
+      const btns = it.written
+        ? '<button data-ocr-undo="'+idx+'" style="padding:3px 8px;font-size:12px;border:1px solid #aaa;border-radius:6px;background:#f5f5f5;cursor:pointer" title="Вернуть прежнее значение">↩ отменить</button>'
+        : '<button data-ocr-apply="'+idx+'" style="padding:3px 8px;font-size:12px;border:1px solid #2e7d32;border-radius:6px;background:#e8f5e9;color:#1b5e20;cursor:pointer">Вписать</button> '+
+          '<button data-ocr-skip="'+idx+'" style="padding:3px 8px;font-size:12px;border:1px solid #aaa;border-radius:6px;background:#f5f5f5;cursor:pointer">Пропустить</button>';
+      return '<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-top:1px solid #eee">'+
+        '<div style="flex:1"><b>'+escHtml(it.label)+'</b>: '+escHtml(fmtOcrVal(it.value))+' '+badge+confTxt+why+'</div>'+
+        '<div style="white-space:nowrap">'+btns+'</div></div>';
+    }).join('');
+    box.innerHTML = '<div style="font-weight:600;margin-bottom:4px">🔎 Распознанные значения'+
+      (bad? ' · <span style="color:#b26a00">'+bad+' требуют подтверждения</span>' : '')+
+      '</div>'+rows+
+      '<div style="margin-top:6px;color:#666;font-size:11px">Сверьте с бумажным бланком перед сохранением.</div>';
+    box.querySelectorAll('button[data-ocr-apply]').forEach(b=>b.addEventListener('click',()=>{
+      const idx=parseInt(b.getAttribute('data-ocr-apply'),10); const it=items[idx]; if(!it) return;
+      for(const id of it.ids){ if(writeTestValue(id, it.value)){ OCR.undo.push(it.undo || it.ids.map(i2=>({id:i2,value:''}))); break; } }
+      it.written=true; it.reasons=[]; renderOcrReview(items);
+    }));
+    box.querySelectorAll('button[data-ocr-skip]').forEach(b=>b.addEventListener('click',()=>{
+      const idx=parseInt(b.getAttribute('data-ocr-skip'),10); items.splice(idx,1); renderOcrReview(items);
+    }));
+    box.querySelectorAll('button[data-ocr-undo]').forEach(b=>b.addEventListener('click',()=>{
+      const idx=parseInt(b.getAttribute('data-ocr-undo'),10); const it=items[idx]; if(!it) return;
+      restoreOcrUndo(it.undo);
+      const ui=OCR.undo.indexOf(it.undo); if(ui>=0) OCR.undo.splice(ui,1);
+      items.splice(idx,1); renderOcrReview(items);
+    }));
+  }
+
+
   initOCRCard();
 
   
@@ -5268,7 +5230,7 @@ if(document.readyState!=='loading') bindComplaintsTab();
   }
 
   // ---------- Version check (overridable via csl.by/version.json) ----------
-  const CURRENT_VERSION = '1.8.49';
+  const CURRENT_VERSION = '1.8.50';
   const VERSION_URL = 'https://csl.by/apps/budzdorov/version.json';
   function showVersionBanner(html, isUpdate){
     let b = document.getElementById('versionBanner');

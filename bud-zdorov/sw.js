@@ -1,9 +1,10 @@
-const CACHE = 'bud-zdorov-v1.8.49-1';
+const CACHE = 'bud-zdorov-v1.8.50-1';
 const ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
   './css/style.css',
+  './js/ocr-engine.js',
   './js/app.js',
   './js/data.js',
   './icons/icon-192.png',
