@@ -24,7 +24,7 @@ jobs:
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: JS syntax check
         run: |
@@ -34,7 +34,7 @@ jobs:
           echo "JS syntax OK"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -46,14 +46,16 @@ jobs:
 
       - name: Set up Android SDK (build-tools 30.0.3)
         run: |
-          mkdir -p "$RUNNER_TEMP/ct"
-          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$RUNNER_TEMP/ct.zip"
-          unzip -q "$RUNNER_TEMP/ct.zip" -d "$RUNNER_TEMP/ct"
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
-          mv "$RUNNER_TEMP/ct/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          # свежий cmdline-tools в temp (в репозитории лежит копия без прав +x)
+          CT="$RUNNER_TEMP/ct"
+          mkdir -p "$CT"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$CT/tools.zip"
+          unzip -q "$CT/tools.zip" -d "$CT"
+          mv "$CT/cmdline-tools" "$CT/latest"
+          chmod +x "$CT/latest/bin/"* 2>/dev/null || true
+          yes | "$CT/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           # platforms;android-30 уже лежит в репозитории — докачиваем только build-tools
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" "build-tools;30.0.3" > /dev/null
+          "$CT/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" "build-tools;30.0.3" > /dev/null
           ls "$ANDROID_HOME/build-tools/30.0.3" | head
 
       - name: Build APK
