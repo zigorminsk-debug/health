@@ -1,0 +1,4 @@
+/home/user/apk-build/gen/by/csl/budzdorov/R.java
+/home/user/apk-build/src/by/csl/budzdorov/MainActivity.java
+/home/user/apk-build/src/by/csl/budzdorov/NativeStorage.java
+/home/user/apk-build/src/by/csl/budzdorov/SimpleFileProvider.java

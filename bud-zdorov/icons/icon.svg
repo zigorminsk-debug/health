@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#43a047"/>
+      <stop offset="1" stop-color="#1b5e20"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#g)"/>
+  <!-- heart + ECG -->
+  <path d="M256 360 C150 280 150 180 220 180 C245 180 256 200 256 215 C256 200 267 180 292 180 C362 180 362 280 256 360 Z"
+        fill="#ffffff"/>
+  <polyline points="90,270 170,270 195,220 220,320 250,240 275,300 305,250 340,270 420,270"
+            fill="none" stroke="#1b5e20" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="90" cy="270" r="8" fill="#c62828"/>
+  <circle cx="420" cy="270" r="8" fill="#c62828"/>
+  <!-- cross / plus for health -->
+  <g transform="translate(380,100)">
+    <rect x="-10" y="-34" width="20" height="68" rx="6" fill="#ffffff"/>
+    <rect x="-34" y="-10" width="68" height="20" rx="6" fill="#ffffff"/>
+  </g>
+</svg>

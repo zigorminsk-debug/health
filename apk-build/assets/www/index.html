@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<meta name="theme-color" content="#2e7d32" />
+<title>ZI Medical tests — lab results tracker</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" type="image/png" href="icons/icon-192.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div class="sticky-top">
+<header class="app-header">
+  <div class="logo">
+    <div class="logo-heart">❤</div>
+    <div>
+      <h1>ZI Medical tests</h1>
+      <p class="subtitle">Lab results tracker · Журнал анализов и рекомендаций</p>
+    </div>
+    <div class="font-ctrl">
+      <button class="fbtn" id="fontMinus" title="Уменьшить шрифт">A−</button>
+      <button class="fbtn" id="fontReset" title="Обычный шрифт">A</button>
+      <button class="fbtn" id="fontPlus" title="Увеличить шрифт">A+</button>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="analyses">🩸 Анализы</button>
+  <button class="tab" data-tab="ecg">💓 ЭКГ</button>
+  <button class="tab" data-tab="ecg-decode">📊 Расшифровка</button>
+  <button class="tab" data-tab="rec">🩺 Рекомендации</button>
+  <button class="tab" data-tab="complaints">🤒 Жалобы</button>
+  <button class="tab" data-tab="reference">📚 Справочник</button>
+  <button class="tab" data-tab="history">📋 История</button>
+  <button class="tab" data-tab="dynamics">📈 Динамика</button>
+  <button class="tab" data-tab="about">ℹ О себе</button>
+</nav>
+</div>
+
+<main>
+  <!-- Patient info bar -->
+  <section id="patient-bar" class="card patient-bar">
+    <label>ФИО пациента: <input type="text" id="patientName" placeholder="Введите ФИО" /></label>
+    <label>Возраст: <input type="number" id="patientAge" min="0" max="120" placeholder="—" style="width:60px" /></label>
+    <label>Пол:
+      <select id="patientSex">
+        <option value="">—</option>
+        <option value="m">Мужской</option>
+        <option value="f">Женский</option>
+      </select>
+    </label>
+    <label>Дата: <input type="date" id="analysisDate" /></label>
+    <div class="search-wrap">
+      <input type="search" id="searchInput" placeholder="🔍 Поиск анализа (например: Глюкоза, КФК, Витамин D, ТТГ)..." />
+      <button id="clearSearch" title="Очистить поиск">✕</button>
+    </div>
+  </section>
+
+  <!-- Analyses tab -->
+  <section id="tab-analyses" class="tab-content active">
+    <div class="card" id="ocrCard">
+      <h3>📸 Распознавание анализов с фото (бета)</h3>
+      <p class="hint">Загрузите фотографию бумажного бланка анализов. Приложение попытается распознать названия показателей и цифры (OCR Tesseract.js) и заполнить найденные поля. При первом запуске скачивается словарь ~3 МБ, распознавание занимает 20–40 сек.</p>
+      <div class="ecg-actions" style="flex-wrap:wrap;gap:8px;margin:10px 0">
+        <label class="btn btn-primary" for="labPhotoCam">📸 Сфотографировать бланк<input type="file" id="labPhotoCam" accept="image/*" capture="environment" hidden /></label>
+        <label class="btn" for="labPhotoGal">🖼 Из галереи (можно несколько)<input type="file" id="labPhotoGal" accept="image/*" multiple hidden /></label>
+        <button class="btn" id="ocrCancel" style="display:none">✕ Отменить</button>
+        <button class="btn" id="ocrClear" style="display:none">🗑 Очистить сканы</button>
+      </div>
+      <div id="ocrStatus" style="padding:6px 0;color:#555">Выберите фото — бланк с анализами (сфотографируйте или из галереи).</div>
+      <div id="ocrPreview" style="max-height:250px;overflow:auto;text-align:center;margin:8px 0"></div>
+    </div>
+  </section>
+
+  <!-- ECG tab -->
+  <section id="tab-ecg" class="tab-content">
+    <div class="card">
+      <h2>💓 Скан/фото кардиограммы</h2>
+      <p class="hint">Загрузите фото или скан ЭКГ. Кнопка «📸 Камера» открывает камеру прямо из приложения, кнопка «🖼 Файл» — выбирает из галереи. Можно выбрать несколько изображений сразу.</p>
+      <div class="ecg-actions">
+        <label class="btn btn-primary">📸 Снять на камеру<input type="file" id="ecgCamera" accept="image/*" capture="environment" hidden /></label>
+        <label class="btn">🖼 Из галереи<input type="file" id="ecgGalleryInput" accept="image/*" multiple hidden /></label>
+        <button id="ecgDecode" class="btn btn-primary" disabled>🩺 Расшифровать ЭКГ</button>
+        <button id="ecgClear" class="btn btn-danger">🗑 Очистить</button>
+      </div>
+      <p class="hint" id="ecgDecodeHint">Загрузите хотя бы один скан ЭКГ, чтобы стала доступна кнопка «🩺 Расшифровать ЭКГ» (калибровка, расчёт ЧСС, интервалов и автоматическая расшифровка).</p>
+      <div id="ecgGallery" class="ecg-gallery"></div>
+    </div>
+    <div class="card">
+      <h2>Жалобы и ощущения в день ЭКГ</h2>
+      <textarea id="ecgNotes" rows="5" placeholder="Например: боль в груди, одышка, головокружение, сердцебиение..."></textarea>
+      <button id="btnAnalyzeEcg" class="btn" style="margin-top:8px">🔍 Проанализировать заметки</button>
+    </div>
+  </section>
+
+  <!-- ECG decode tab (replaces fullscreen overlay as a proper tab) -->
+  <section id="tab-ecg-decode" class="tab-content">
+    <div class="card">
+      <h2>📊 Расшифровка ЭКГ</h2>
+      <p class="hint">
+        Здесь открывается анализатор плёнки ЭКГ: калибровка, измерение ЧСС и интервалов,
+        автоматический анализ сегмента ST и итоговая расшифровка.
+        Нажмите «🩺 Расшифровать ЭКГ» на вкладке «💓 ЭКГ», чтобы загрузить сюда снимок,
+        или выберите снимок прямо из этой вкладки.
+      </p>
+      <div class="ecg-actions" style="margin:8px 0">
+        <label class="btn">🖼 Выбрать снимок<input type="file" id="ecvGalleryQuick" accept="image/*" hidden /></label>
+        <button id="ecvBack" class="btn" data-ecv-act="ecvBack">← Вернуться к ЭКГ</button>
+        <button id="ecvPrev" class="btn" data-ecv-act="ecvPrev">◀ Пред.</button>
+        <span id="ecvNavLabel" style="padding:6px 4px;font-weight:600"></span>
+        <button id="ecvNext" class="btn" data-ecv-act="ecvNext">След. ▶</button>
+        <button class="btn" data-ecv-act="ecvRotate" title="Повернуть на 90°">↻ Поворот</button>
+        <button id="ecvCalibTab" class="btn btn-primary" data-ecv-act="ecvCalib">📐 Калибровать</button>
+        <button id="ecvAutoTab" class="btn btn-primary" data-ecv-act="ecvAuto">🤖 Автоанализ</button>
+        <button id="ecvReportTab" class="btn btn-primary" data-ecv-act="ecvReport">📋 Расшифровать</button>
+        <button id="ecvRRTab" class="btn" data-ecv-act="ecvRR">💓 Считать ЧСС (R-R)</button>
+        <button id="ecvMeasureTab" class="btn" data-ecv-act="ecvMeasure">📏 Измерить интервал</button>
+        <button id="ecvCropTab" class="btn" data-ecv-act="ecvCrop">✂ Обрезать</button>
+        <button id="ecvApplyCropTab" class="btn btn-primary" data-ecv-act="ecvApplyCrop" style="display:none">✅ Применить</button>
+        <button id="ecvCancelCropTab" class="btn btn-danger" data-ecv-act="ecvCancelCrop" style="display:none">✕ Отменить</button>
+        <button class="btn" data-ecv-act="ecvPickLead">☝ Выбрать отведение</button>
+        <button id="ecvResetTab" class="btn" data-ecv-act="ecvReset">♻ Сброс</button>
+      </div>
+      <div id="ecvCanvasWrap" class="ecv-canvas-wrap" style="max-height:55vh;background:#0b1e0b"><canvas id="ecvCanvasTab"></canvas></div>
+      <div class="hint" style="margin-top:8px" id="ecvHintTab">Загрузите снимок ЭКГ, чтобы открыть расшифровку.</div>
+      <div id="ecvMeasurementsTab" style="padding:8px 4px;color:#333;font-size:calc(13px*var(--fz));display:flex;flex-wrap:wrap;gap:10px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0">
+        <label>Скорость:
+          <select id="ecvSpeedTab" data-ecv-change="ecvSpeed">
+            <option value="25">25 мм/с</option>
+            <option value="50" selected>50 мм/с</option>
+            <option value="100">100 мм/с</option>
+          </select>
+        </label>
+        <label>Калибровка мВ:
+          <select id="ecvMvTab" data-ecv-change="ecvMv">
+            <option value="5">5 мм/мВ (×½)</option>
+            <option value="10" selected>10 мм/мВ (1 мВ)</option>
+            <option value="20">20 мм/мВ (×2)</option>
+          </select>
+        </label>
+        <span id="ecvPxmmTab" style="color:#888">—</span>
+      </div>
+      <div class="ecg-filter" style="padding:8px 4px;border-top:1px solid #eee;display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:calc(13px*var(--fz))">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="ecvEnhanceToggle" checked> <b>✨ Улучшение</b>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px">
+          Контраст: <input type="range" id="ecvContrast" min="0.5" max="4" step="0.1" value="1.6" style="width:110px">
+          <span id="ecvContrastVal" style="min-width:30px">1.6</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px">
+          Сетка: <input type="range" id="ecvGrid" min="0" max="1" step="0.05" value="0.7" style="width:110px">
+          <span id="ecvGridVal" style="min-width:30px">70%</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px">
+          Чернила: <input type="range" id="ecvInk" min="1" max="5" step="0.1" value="3.2" style="width:110px">
+          <span id="ecvInkVal" style="min-width:30px">3.2</span>
+        </label>
+        <button class="btn" id="ecvFilterReset" style="padding:6px 10px">↺ Сброс</button>
+      </div>
+    </div>
+    <div class="card" id="ecvDecTab">
+      <p><b>📊 Загрузите или выберите скан ЭКГ, и здесь появится расшифровка.</b></p>
+      <div class="warning-box">
+        <strong>⚠ Важно:</strong> данная функция — информационная помощь, не замена врача-кардиолога и функционального диагноста. Острую боль в груди — звоните 103 немедленно.
+      </div>
+    </div>
+  </section>
+
+  <!-- Recommendations tab -->
+  <section id="tab-rec" class="tab-content">
+    <div class="card">
+      <h2>🩺 Рекомендации</h2>
+      <p class="hint">Здесь отображаются результаты анализа введённых показателей и заметок ЭКГ: на что обратить внимание, какие заболевания могут быть причиной отклонений, их симптоматика и к какому врачу обратиться.</p>
+      <div class="history-actions">
+        <button id="btnAnalyzeTab" class="btn btn-primary">🔍 Проанализировать сейчас</button>
+      </div>
+      <div id="tabRecContent">
+        <div class="rec-item"><div class="tname">📌 Пока нет анализа</div><p>Нажмите «🔍 Проанализировать сейчас» или плавающую кнопку «🔍 Анализировать» внизу экрана — и здесь появятся персональные рекомендации по введённым результатам.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- History tab -->
+  <section id="tab-history" class="tab-content">
+    <div class="card">
+      <h2>📋 Сохранённые записи</h2>
+      <p class="hint">Сохраняйте результаты каждый раз после сдачи анализов. Чем больше записей, тем точнее анализ динамики на вкладке «📈 Динамика».</p>
+      <div class="history-actions">
+        <button id="btnSave" class="btn btn-primary">💾 Сохранить текущие данные</button>
+        <button id="btnExport" class="btn">📤 Экспорт (JSON)</button>
+        <label class="btn">📥 Импорт<input type="file" id="importFile" accept="application/json" hidden /></label>
+        <button id="btnClear" class="btn btn-danger">🗑 Очистить форму</button>
+      </div>
+      <div id="historyList" class="history-list"></div>
+    </div>
+  </section>
+
+  <!-- Dynamics tab -->
+  <section id="tab-dynamics" class="tab-content">
+    <div class="card">
+      <h2>📈 Анализ динамики по всем записям</h2>
+      <p class="hint">Показывает, как меняются ваши показатели от сдачи к сдаче, как лечение/диета/образ жизни влияют на общую картину, и на что обратить особое внимание.</p>
+      <div id="dynSummary"></div>
+    </div>
+    <div class="card">
+      <h2>Графики изменения показателей</h2>
+      <p class="hint">Отмечены референсные границы (зелёная зона). Красная точка — показатель выходил за норму.</p>
+      <div id="dynCharts"></div>
+    </div>
+    <div class="card">
+      <h2>Тренды по показателям</h2>
+      <div id="dynDetails"></div>
+    </div>
+  </section>
+
+  <!-- Complaints (symptom checker) tab -->
+  <section id="tab-complaints" class="tab-content">
+    <div class="card">
+      <h2>🤒 Жалобы — проверка симптомов</h2>
+      <p class="hint">Опишите, что вас беспокоит, своими словами (где болит, как давно, характер боли, температура, тошнота, слабость, одышка и т.д.). Приложение выделит ключевые симптомы и подскажет, к какому специалисту обратиться и на что обратить внимание. <b style="color:#b3261e">ЭТО НЕ ДИАГНОЗ — при угрожающих симптомах звоните 103.</b></p>
+      <textarea id="complaintsText" placeholder="Например: второй день давящая боль за грудиной при ходьбе, отдаёт в левую руку, холодный пот и одышка... или: изжога после еды, отрыжка кислым..." style="width:100%;min-height:140px;padding:10px;border:1px solid #ccc;border-radius:8px;font-family:inherit;font-size:15px;background:#fafafa"></textarea>
+      <div style="margin:8px 0">
+        <button class="btn btn-primary" id="complaintsGo">🔍 Проанализировать жалобы</button>
+        <button class="btn" id="complaintsWebSearch" title="Искать в медицинских справочниках">🌐 Найти в мед. справочниках</button>
+        <span style="color:#888;font-size:13px;margin-left:8px">Примеры (нажмите для подстановки):</span>
+        <button class="chip" data-complaint-sample="внезапная сильная головная боль как гром среди ясного неба, тошнота">⚠ Громоподобная головная боль</button>
+        <button class="chip" data-complaint-sample="перекос лица, невнятная речь, не поднимается правая рука">⚠ Инсульт (FAST)</button>
+        <button class="chip" data-complaint-sample="боль за грудиной при нагрузке, отдает в лопатку, холодный пот">⚠ Стенокардия/ИМ</button>
+        <button class="chip" data-complaint-sample="температура 38.5, кашель с жёлтой мокротой, одышка">ОРВ/пневмония</button>
+        <button class="chip" data-complaint-sample="изжога после еды, отрыжка кислым, жжение за грудиной">Изжога/ГЭРБ</button>
+        <button class="chip" data-complaint-sample="постоянная жажда, часто хожу в туалет по-маленькому, слабость">Жажда/сахар</button>
+      </div>
+      <div id="complaintsResult" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <!-- Medical Reference tab -->
+  <section id="tab-reference" class="tab-content">
+    <div class="card">
+      <h2>📚 Справочник медицинской литературы</h2>
+      <p class="hint">Внешние источники доказательной медицины — PubMed, MedlinePlus, ВОЗ, ГЭОТАР-Медиа, Минздрав РФ и др. Выберите источник, страница откроется внутри приложения. Для чтения некоторых статей может понадобиться подписка издателя.</p>
+      <div style="margin-bottom:8px">
+        <button class="btn" id="refBack">← Назад</button>
+        <button class="btn" id="refOpenExt">↗ Открыть во внешнем браузере</button>
+      </div>
+      <div id="refWeb" style="display:none;margin-top:8px;border:1px solid #ccc;border-radius:8px;overflow:hidden">
+        <iframe id="refIframe" style="width:100%;height:70vh;border:0;display:none" referrerpolicy="no-referrer"></iframe>
+      </div>
+      <div id="refList"></div>
+    </div>
+  </section>
+
+  <!-- About tab -->
+  <section id="tab-about" class="tab-content">
+    <div class="card about-card">
+      <h2>ℹ О приложении</h2>
+      <p><strong>ZI Medical tests</strong> — мобильный журнал для внесения результатов анализов крови и мочи, а также сканов ЭКГ. Приложение сравнивает введённые значения с референсными интервалами и даёт справочную информацию о возможных отклонениях: на что обратить внимание, какие состояния могут быть причиной, их типичная симптоматика и к какому врачу обратиться. Поддерживает анализ динамики по множественным сохранённым записям, чтобы отслеживать эффективность лечения и влияние образа жизни.</p>
+      <div class="warning-box">
+        <strong>⚠ Важно:</strong> информация носит исключительно справочно-ознакомительный характер и не заменяет очной консультации врача. Не занимайтесь самолечением! При любых отклонениях обратитесь к специалисту.
+      </div>
+      <div class="warning-box" style="border-left-color:#1976d2;background:#e3f2fd">
+        <strong>ℹ Обновления:</strong> начиная с версии 1.6.2 приложение подписано постоянным ключом — все последующие версии будут устанавливаться <b>поверх старой</b> без удаления и потери данных. Если у вас установлена версия до 1.6.2, установите эту версию <b>поверх</b>; если Android выдаст ошибку подписи — удалите старую версию один раз (при этом все сохранённые данные останутся в папке <i>BudZdorov</i> на внешней памяти и будут подхвачены новой версией автоматически).
+      </div>
+      <h3>Разработчик</h3>
+      <ul class="contact">
+        <li><strong>Zakharevich Igor</strong></li>
+        <li>📞 <a href="tel:+375293371413">+375 29 337-14-13</a></li>
+        <li>🌐 <a href="http://csl.by" target="_blank" rel="noopener">csl.by</a></li>
+      </ul>
+      <p class="version">Версия 1.8.48</p>
+    </div>
+  </section>
+</main>
+
+<button id="fabAnalyze" class="fab">🔍 Анализировать</button>
+
+<!-- PIN lock screen -->
+<div id="pinLock" class="pin-lock hidden">
+  <div class="pin-card">
+    <div class="pin-logo">🔒</div>
+    <h2 id="pinTitle">Введите PIN-код</h2>
+    <p id="pinHint" class="hint">PIN защищает доступ к вашим медицинским данным.</p>
+    <input type="password" id="pinInput" inputmode="numeric" maxlength="6" placeholder="••••" autocomplete="off" />
+    <div class="pin-actions">
+      <button id="pinOk" class="btn btn-primary">OK</button>
+      <button id="pinSet" class="btn">Установить/сменить PIN</button>
+    </div>
+    <p id="pinError" class="pin-error"></p>
+  </div>
+</div>
+
+<!-- Set PIN dialog -->
+<div id="pinSetPanel" class="recommendation-panel hidden">
+  <div class="rec-header"><h2>🔑 Установка PIN</h2><button id="closePinSet" class="icon-btn">✕</button></div>
+  <div class="rec-content">
+    <div class="rec-item">
+      <p>Введите новый PIN от 4 до 6 цифр. Оставьте поле пустым и нажмите «Сохранить», чтобы отключить защиту.</p>
+      <input type="password" id="newPin1" inputmode="numeric" maxlength="6" placeholder="Новый PIN" style="width:100%;padding:10px;font-size:18px;border:1px solid var(--gray-200);border-radius:8px;margin:8px 0;text-align:center" />
+      <input type="password" id="newPin2" inputmode="numeric" maxlength="6" placeholder="Повторите PIN" style="width:100%;padding:10px;font-size:18px;border:1px solid var(--gray-200);border-radius:8px;margin:8px 0;text-align:center" />
+      <div style="text-align:right">
+        <button id="pinSetCancel" class="btn">Отмена</button>
+        <button id="pinSetSave" class="btn btn-primary">Сохранить</button>
+      </div>
+      <p id="pinSetErr" class="pin-error"></p>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<!-- Fullscreen landscape lead-picker overlay -->
+<div id="fsPicker" class="fs-picker" style="display:none">
+  <div class="fs-picker-bar">
+    <div class="lbl"><b>☝ Выберите ритм-полосу</b><br><span style="opacity:.85;font-size:90%">Зум — щипком/кнопками, перетаскивание одним пальцем. <span id="fsSelLabel" style="color:#ffeb3b;font-weight:600"></span></span></div>
+    <button class="btn" id="fsRotate" onclick="window.__fsRotate&&window.__fsRotate()" title="Повернуть плёнку на 90°">↻ Поворот</button>
+    <button class="btn" id="fsBottomLead" onclick="window.__fsBottom&&window.__fsBottom()" title="Выбрать длинную полосу отведения II внизу">↓ Полоса II</button>
+    <button class="btn" id="fsZoomOut" onclick="window.__fsZoom(-1)">➖</button>
+    <button class="btn" id="fsZoomFit" onclick="window.__fsZoom(0)">⛶</button>
+    <button class="btn" id="fsZoomIn" onclick="window.__fsZoom(1)">➕</button>
+    <button class="btn primary" id="fsPickOk" onclick="window.__fsAccept && window.__fsAccept()">✅ Анализировать</button>
+    <button class="btn" id="fsPickCancel" onclick="window.__fsCancel&&window.__fsCancel()">✕ Отмена</button>
+  </div>
+  <div class="fs-picker-stage" id="fsStage">
+    <div class="fs-picker-viewport" id="fsViewport"><canvas id="fsCanvas" class="fs-picker-canvas"></canvas></div>
+    <div id="fsBandHl" class="fs-band-hl"><div class="fs-band-edge top" data-edge="top"></div><div class="fs-band-bar" data-edge="move"></div><div class="fs-band-edge bot" data-edge="bot"></div></div>
+  </div>
+  <div class="fs-picker-rotate-hint" id="fsRotateHint">📱 Поверните телефон горизонтально — плёнка видна целиком</div>
+</div>
+<script src="js/app.js"></script>
+<script>
+// (Service Worker intentionally disabled — app runs from file:///android_asset
+//  where SW is not supported in Android WebView and would only stale-cache.)
+</script>
+</body>
+</html>
