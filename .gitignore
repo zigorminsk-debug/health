@@ -1,0 +1,7 @@
+# Сгенерированные артефакты сборки APK (пересоздаются build-apk.sh)
+apk-build/
+*.idsig
+
+# Служебный мусор
+.wget-hsts
+.android/

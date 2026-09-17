@@ -1,4 +1,4 @@
-const CACHE = 'bud-zdorov-v1.8.48-1788926619';
+const CACHE = 'bud-zdorov-v1.8.49-1';
 const ASSETS = [
   './',
   './index.html',

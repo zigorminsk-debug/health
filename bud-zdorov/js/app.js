@@ -87,9 +87,11 @@
     new MutationObserver(wire).observe(document.documentElement, {childList:true, subtree:true});
   })();
 
-  // ---- File-based storage bridge (survives app reinstall on Android) ----
-  // When running in APK, window.NativeStorage (provided via @JavascriptInterface) is
-  // available and persists data in /Android/data/by.csl.budzdorov/files/BudZdorov/.
+  // ---- Storage bridge ----
+  // When running in APK, window.NativeStorage (provided via @JavascriptInterface)
+  // persists the important keys in the app's private SharedPreferences — данные
+  // переживают любые обновления приложения (но НЕ uninstall; для переноса между
+  // устройствами используйте Экспорт/Импорт JSON).
   // Otherwise (PWA/browser) we fall back to localStorage.
   const FileStorage = {
     _native: (typeof window !== 'undefined' && window.NativeStorage) ? window.NativeStorage : null,
@@ -125,7 +127,7 @@
     const _origGet = Storage.prototype.getItem;
     const _origSet = Storage.prototype.setItem;
     const _origRem = Storage.prototype.removeItem;
-    const PERSIST_KEYS = ['budzdorov_history','budzdorov_draft','budzdorov_fz','budzdorov_pin','budzdorov_lastcheck'];
+    const PERSIST_KEYS = ['budzdorov_history','budzdorov_draft','budzdorov_fz','budzdorov_pin','budzdorov_lastcheck','budzdorov_lastversion'];
     Storage.prototype.getItem = function(k){
       if (PERSIST_KEYS.indexOf(k)>=0){ const v=FileStorage.get(k); return v===null?null:v; }
       return _origGet.call(this,k);
@@ -227,6 +229,7 @@
   }
 
   function evaluateRow(group,t,row){
+    if (!t) return; // защита от нерезолвленных data-group/data-test (см. CODE_REVIEW A1)
     const input = $('.test-input',row);
     const status = $('[data-status]',row);
     input.classList.remove('low','high');
@@ -244,6 +247,7 @@
     const v = parseValue(input.value);
     if (v === null){ status.textContent='—'; return; }
     const range = getRange(t);
+    if (!range){ status.textContent='—'; return; } // у показателя нет числовых норм
     if (v < range[0]){
       status.textContent = `↓ < ${fmt(range[0])}`;
       status.classList.add('status-low'); input.classList.add('low');
@@ -259,7 +263,9 @@
   $('#patientSex').addEventListener('change',()=>{
     $$('.test-row').forEach(row=>{
       const g = ANALYSIS_GROUPS.find(g=>g.id===row.dataset.group);
+      if (!g) return;
       const t = g.tests.find(t=>t.id===row.dataset.test);
+      if (!t) return;
       evaluateRow(g,t,row);
     });
   });
@@ -357,7 +363,7 @@
   // ---------- Contextual Analyze FAB ----------
   // On the Complaints tab this button triggers complaint analysis;
   // on other tabs it runs analysis (recommendations/recs) as before.
-  const recContent = $('#tab-rec-content') || $('#tabRecContent');
+  const recContent = $('#tabRecContent');
   $('#fabAnalyze').addEventListener('click',()=>{
     const activeTab = document.querySelector('.tab.active');
     const activeName = activeTab? activeTab.dataset.tab : '';
@@ -581,7 +587,7 @@
       const ecgCnt = (entry.ecg||[]).length;
       div.innerHTML = `
         <div class="hed">
-          <span>${entry.patientName||'Без имени'}${entry.patientAge?`, ${entry.patientAge} лет`:''} ${entry.patientSex==='m'?'♂':(entry.patientSex==='f'?'♀':'')}</span>
+          <span>${escHtml(entry.patientName||'Без имени')}${entry.patientAge?`, ${escHtml(entry.patientAge)} лет`:''} ${entry.patientSex==='m'?'♂':(entry.patientSex==='f'?'♀':'')}</span>
           <span>${entry.date||''}</span>
         </div>
         <div class="meta">Отклонений: ${abn} · ЭКГ сканов: ${ecgCnt}</div>
@@ -603,6 +609,16 @@
     });
   }
 
+  // Группы-дубликаты переименованы в 1.8.49 (thyroid_full, vitamins_ext), чтобы ключи
+  // сохранений «group::test» стали уникальными. Старые записи читаем через алиасы.
+  const LEGACY_GROUP_RENAME = { thyroid:'thyroid_full', vitamins:'vitamins_ext' };
+  function rowForKey(gid,tid){
+    const row = $(`.test-row[data-group="${gid}"][data-test="${tid}"]`);
+    if (row) return row;
+    const alt = LEGACY_GROUP_RENAME[gid];
+    return alt ? $(`.test-row[data-group="${alt}"][data-test="${tid}"]`) : null;
+  }
+
   function loadSnapshot(entry){
     $('#analysisDate').value = entry.date||'';
     $('#patientName').value = entry.patientName||'';
@@ -614,12 +630,12 @@
     renderEcg();
     for (const k in entry.values){
       const [gid,tid]=k.split('::');
-      const row = $(`.test-row[data-group="${gid}"][data-test="${tid}"]`);
+      const row = rowForKey(gid,tid);
       if (row){
         const inp = $('.test-input',row);
         inp.value = entry.values[k];
-        const g = ANALYSIS_GROUPS.find(g=>g.id===gid);
-        const t = g.tests.find(t=>t.id===tid);
+        const g = ANALYSIS_GROUPS.find(g=>g.id===row.dataset.group);
+        const t = g && g.tests.find(t=>t.id===tid);
         evaluateRow(g,t,row);
       }
     }
@@ -685,7 +701,11 @@
 
   // ---------- DYNAMICS ----------
   function findTest(gid,tid){
-    const g = ANALYSIS_GROUPS.find(g=>g.id===gid);
+    let g = ANALYSIS_GROUPS.find(g=>g.id===gid);
+    if (!g){
+      const alt = LEGACY_GROUP_RENAME[gid];
+      if (alt) g = ANALYSIS_GROUPS.find(g=>g.id===alt);
+    }
     return g?g.tests.find(t=>t.id===tid):null;
   }
   function getNumRange(t, sex){
@@ -761,7 +781,7 @@
         chronic.push(t);
         const moved = Math.abs(l-range[0])+Math.abs(l-range[1]) - (Math.abs(f-range[0])+Math.abs(f-range[1]));
         if (moved<0) improvedTests.push(t); else worsenedTests.push(t);
-      } else { nowNormalTests: nowNormal.push(t); normalNow++; }
+      } else { nowNormal.push(t); normalNow++; }
     });
 
     const lastAbn = abnormalCount(last.values||{});
@@ -872,7 +892,7 @@
       const det = document.createElement('div');
       det.className = 'dyn-test '+(bad?'bad':(firstAbn&&!lastAbn?'improved':(lastAbn?'warn':'')));
       det.innerHTML = `<div class="tname">${t.name} (${g.title.replace(/^[^\s]+\s/,'')})</div>
-        <div class="thist">${pts.map(p=>`<span title="${p.note||''}">${(p.date||'').slice(5)}: <b>${shortNum(p.value)}</b>${p.value<range[0]?' ↓':(p.value>range[1]?' ↑':'')}${p.note?' 📝':''}</span>`).join(' · ')}</div>
+        <div class="thist">${pts.map(p=>`<span title="${escHtml(p.note||'')}">${(p.date||'').slice(5)}: <b>${shortNum(p.value)}</b>${p.value<range[0]?' ↓':(p.value>range[1]?' ↑':'')}${p.note?' 📝':''}</span>`).join(' · ')}</div>
         <div class="trep">${dynamicNarrative(t,pts,range)}</div>`;
       detailsBox.appendChild(det);
     });
@@ -912,7 +932,7 @@
     const dirWord = tr.delta>0?'вырос':'снизился';
     const pctTxt = Math.abs(tr.pct)>=5?` (${dirWord} на ${Math.round(Math.abs(tr.pct))}% от начального значения)`:'';
     // find notes between first and last
-    const notes = pts.filter(p=>p.note).map(p=>`${(p.date||'').slice(5)} — «${p.note}»`).slice(-3);
+    const notes = pts.filter(p=>p.note).map(p=>`${(p.date||'').slice(5)} — «${escHtml(p.note)}»`).slice(-3);
 
     let txt = `Показатель ${pctTxt}: с ${shortNum(first)} до ${shortNum(last)} ${t.unit||''}. Сейчас ${relDir(last,range)} (норма ${fmt(range[0])}–${fmt(range[1])} ${t.unit||''}). `;
     if (fAbn && !lAbn) txt += '✅ Вошёл в норму — это признак эффективности проводимой терапии/диеты/коррекции образа жизни. Продолжайте под контролем врача.';
@@ -944,10 +964,10 @@
       if (d.values){
         for (const k in d.values){
           const [gid,tid]=k.split('::');
-          const row = $(`.test-row[data-group="${gid}"][data-test="${tid}"]`);
+          const row = rowForKey(gid,tid);
           if (row){
             $('.test-input',row).value = d.values[k];
-            const g = ANALYSIS_GROUPS.find(g=>g.id===gid);
+            const g = ANALYSIS_GROUPS.find(g=>g.id===row.dataset.group);
             const t = g && g.tests.find(t=>t.id===tid);
             if (g&&t) evaluateRow(g,t,row);
           }
@@ -1031,10 +1051,27 @@
     pinHint.textContent = isPinSet()?'PIN защищает доступ к вашим медицинским данным.':'PIN ещё не установлен. Нажмите «Установить/сменить PIN», чтобы защитить данные.';
   }
   function unlockApp(){ unlocked=true; pinLock.classList.add('hidden'); }
-  function checkPin(pin){ const stored=localStorage.getItem(PIN_KEY); return stored && stored===pin; }
-  $('#pinOk').addEventListener('click',()=>{
+  // PIN храним как солёный SHA-256, а не открытым текстом; старые plaintext-записи
+  // прозрачно мигрируют при первом успешном вводе.
+  async function hashPin(pin){
+    try{
+      if (window.crypto && crypto.subtle && crypto.subtle.digest){
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('budzdorov.pin.v1::'+pin));
+        return 'sha256:'+Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+      }
+    }catch(e){}
+    return 'plain:'+pin; // страховка для очень старых WebView без WebCrypto
+  }
+  async function checkPin(pin){
+    const stored = localStorage.getItem(PIN_KEY);
+    if (!stored) return false;
+    if (stored.indexOf('sha256:')===0) return stored === await hashPin(pin);
+    if (stored === pin){ localStorage.setItem(PIN_KEY, await hashPin(pin)); return true; } // миграция со старого формата
+    return false;
+  }
+  $('#pinOk').addEventListener('click',async ()=>{
     if (!isPinSet()){ unlockApp(); return; }
-    if (checkPin(pinInput.value)){ pinError.textContent=''; unlockApp(); }
+    if (await checkPin(pinInput.value)){ pinError.textContent=''; unlockApp(); }
     else { pinError.textContent='Неверный PIN. Попробуйте ещё раз.'; pinInput.value=''; pinInput.focus(); }
   });
   pinInput.addEventListener('keydown',e=>{ if(e.key==='Enter') $('#pinOk').click(); });
@@ -1044,12 +1081,12 @@
   });
   $('#closePinSet').addEventListener('click',()=>pinSetPanel.classList.add('hidden'));
   $('#pinSetCancel').addEventListener('click',()=>pinSetPanel.classList.add('hidden'));
-  $('#pinSetSave').addEventListener('click',()=>{
+  $('#pinSetSave').addEventListener('click',async ()=>{
     const p1=$('#newPin1').value, p2=$('#newPin2').value;
     if (p1===''){ localStorage.removeItem(PIN_KEY); pinSetPanel.classList.add('hidden'); alert('PIN отключён.'); unlockApp(); lockApp(); return; }
     if (!/^\d{4,6}$/.test(p1)){ $('#pinSetErr').textContent='PIN должен содержать 4–6 цифр.'; return; }
     if (p1!==p2){ $('#pinSetErr').textContent='PIN не совпадает.'; return; }
-    localStorage.setItem(PIN_KEY, p1);
+    localStorage.setItem(PIN_KEY, await hashPin(p1));
     pinSetPanel.classList.add('hidden');
     alert('PIN установлен.'); unlockApp(); lockApp();
   });
@@ -2629,22 +2666,28 @@
       img.style.cursor='zoom-in';
       img.addEventListener('click',()=>openEcgViewer(ecgImages[i]));
     });
-    $$('#historyView .ecg-item img').forEach(img=>{
+    $$('#historyList .ecg-item img').forEach(img=>{
       if (img.dataset.ecvBound) return;
       img.dataset.ecvBound='1';
       img.style.cursor='zoom-in';
       img.addEventListener('click',()=>openEcgViewer({dataUrl: img.src}));
     });
   }
-  // monkey-patch renderEcg to also bind clicks
-  const _origRender = renderEcg;
-  renderEcg = function(){ _origRender(); bindEcgClicks(); };
+  // monkey-patch renderEcg to also bind clicks (однократно, защита от двойной обёртки)
+  if (!renderEcg.__bzPatched){
+    const _origRender = renderEcg;
+    renderEcg = function(){ _origRender(); bindEcgClicks(); };
+    renderEcg.__bzPatched = true;
+  }
   // Also for ECG in history entries — bind when loading snapshot
-  const _origLoadSnapshot = loadSnapshot;
-  loadSnapshot = function(entry){ _origLoadSnapshot(entry); setTimeout(bindEcgClicks,50); };
+  if (!loadSnapshot.__bzPatched){
+    const _origLoadSnapshot = loadSnapshot;
+    loadSnapshot = function(entry){ _origLoadSnapshot(entry); setTimeout(bindEcgClicks,50); };
+    loadSnapshot.__bzPatched = true;
+  }
   // Bind clicks each time history is rendered
   function observeHistory(){
-    const hv=$('#historyView'); if(!hv) return;
+    const hv=$('#historyList'); if(!hv) return;
     const mo=new MutationObserver(bindEcgClicks);
     mo.observe(hv,{childList:true,subtree:true});
   }
@@ -3169,7 +3212,7 @@
       if(oldDbg) oldDbg.remove();
       if(status) status.innerHTML='📥 Получено файлов: <b>'+arr.length+'</b>. Загружаю и подготавливаю изображение...';
       try{
-        await runOCR(arr, status, cancelBtn, preview);
+        await runOCR(arr, status, cancelBtn, preview, clearBtn);
       }catch(err){
         console.error('ocr top-level error', err);
         if(status) status.innerHTML='❌ Ошибка: '+(err && err.message?err.message:err);
@@ -3293,7 +3336,7 @@
     const sampleW = 1100;
     const angles=[0,90,180,270];
     const KEYWORDS = /гемоглобин|эритроцит|лейкоцит|тромбоцит|гематокрит|ретикулоцит|лимфоцит|моноцит|эозинофил|базофил|нейтрофил|палочкоядер|сегменто|свертываем|фибриноген|ачтв|протромбин|тромбинов|мочевин|креатинин|билирубин|глюкоз|холестерин|алт|аст|щелочная|ггтп|лдг|кфк|амилаза|альбумин|общий белок|калий|натрий|кальций|магний|фосфор|железо|ттг|т4|т3|витамин|с-реактив|показатель|результат|исследов|референ|единиц|женщин|мужчин|фамил|отделен|дата|анализатор|сыворот|лейкоцитарн/i;
-    let best=0, bestScore=-1, bestTxt='';
+    let best=0, bestScore=-1;
     for(const ang of angles){
       const c = renderRotated(img, ang, sampleW);
       const url = c.toDataURL('image/jpeg', 0.8);
@@ -3314,7 +3357,7 @@
         let score = kwHits*15 + decim*4 + wordLen*0.5 + cyr*0.02 + Math.min(ints,50)*0.3;
         // Upside-down penalty: Tesseract usually reads far fewer keywords/words when flipped
         if(ang===180) score *= 0.85;
-        if(score > bestScore){ bestScore=score; best=ang; bestText=txt; }
+        if(score > bestScore){ bestScore=score; best=ang; }
       }catch(e){}
     }
     return best;
@@ -3343,7 +3386,7 @@
     const thumbUrl = thumbCvs.toDataURL('image/jpeg', 0.82);
     return {text, angle, thumbUrl};
   }
-  async function runOCR(files, status, cancelBtn, preview){
+  async function runOCR(files, status, cancelBtn, preview, clearBtn){
     if(OCR.busy){ if(status)status.textContent='Идёт другое распознавание, подождите...'; return; }
     OCR.busy=true;
     let cancelled=false;
@@ -5225,7 +5268,7 @@ if(document.readyState!=='loading') bindComplaintsTab();
   }
 
   // ---------- Version check (overridable via csl.by/version.json) ----------
-  const CURRENT_VERSION = '1.8.46';
+  const CURRENT_VERSION = '1.8.49';
   const VERSION_URL = 'https://csl.by/apps/budzdorov/version.json';
   function showVersionBanner(html, isUpdate){
     let b = document.getElementById('versionBanner');
@@ -5289,4 +5332,11 @@ if(document.readyState!=='loading') bindComplaintsTab();
     aboutCard2.insertBefore(chk, ver);
   }
   setTimeout(checkVersion, 2500);
+
+  // ---------- Service Worker: офлайн-режим для PWA (только http/https) ----------
+  // В APK приложение работает с file:///android_asset, где Service Worker не
+  // поддерживается WebView, поэтому там регистрация пропускается.
+  if ((location.protocol==='http:'||location.protocol==='https:') && 'serviceWorker' in navigator){
+    window.addEventListener('load',()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
+  }
 })();

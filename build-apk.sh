@@ -2,25 +2,58 @@
 # ============================================================
 # APK builder for "ZI Medical tests"
 # Developer: Zakharevich Igor, +375293371413, csl.by
+#
+# Все пути вычисляются относительно корня репозитория, поэтому скрипт
+# работает и локально, и в GitHub Actions. JDK/Android SDK берутся из
+# окружения (JAVA_HOME / ANDROID_HOME), иначе — из папок репозитория.
 # ============================================================
 set -euo pipefail
 
-export JAVA_HOME=/usr/lib/jvm/jdk-11
-export ANDROID_HOME=/home/user/android-sdk
-export PATH=$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/build-tools/30.0.3:$PATH
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-APP_NAME="ZI Medical tests"
-APP_ID="by.csl.budzdorov"
-BUILD_DIR="/home/user/apk-build"
-SRC_WEB="/home/user/bud-zdorov"
-OUT_APK="/home/user/BudZdorov.apk"
+# ---------------- JDK ----------------
+if [ -z "${JAVA_HOME:-}" ]; then
+  if command -v javac >/dev/null 2>&1; then
+    JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+  elif [ -x "$ROOT/jdk-17.0.2/bin/javac" ]; then
+    JAVA_HOME="$ROOT/jdk-17.0.2"
+    chmod +x "$JAVA_HOME"/bin/* 2>/dev/null || true
+  else
+    echo "ERROR: JDK не найден. Задайте JAVA_HOME или добавьте javac в PATH." >&2
+    exit 1
+  fi
+fi
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# ---------------- Android SDK ----------------
+ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$ROOT/android-sdk}}"
+export ANDROID_HOME
+BT="$ANDROID_HOME/build-tools/30.0.3"
 
 ANDROID_JAR="$ANDROID_HOME/platforms/android-30/android.jar"
-AAPT="$ANDROID_HOME/build-tools/30.0.3/aapt"
-D8="$ANDROID_HOME/build-tools/30.0.3/d8"
-ZIPALIGN="$ANDROID_HOME/build-tools/30.0.3/zipalign"
-APKSIGNER="$ANDROID_HOME/build-tools/30.0.3/apksigner"
-# (keystore is created in step 9 at a persistent location)
+AAPT="$BT/aapt"
+D8="$BT/d8"
+ZIPALIGN="$BT/zipalign"
+APKSIGNER="$BT/apksigner"
+
+for f in "$AAPT" "$D8" "$ZIPALIGN" "$APKSIGNER"; do
+  [ -e "$f" ] || { echo "ERROR: не найден $f — установите SDK: sdkmanager 'build-tools;30.0.3' 'platforms;android-30'" >&2; exit 1; }
+  chmod +x "$f" 2>/dev/null || true
+done
+[ -f "$ANDROID_JAR" ] || { echo "ERROR: нет $ANDROID_JAR" >&2; exit 1; }
+command -v zip     >/dev/null 2>&1 || { echo "ERROR: нужна утилита zip"     >&2; exit 1; }
+command -v convert >/dev/null 2>&1 || { echo "ERROR: нужен ImageMagick (convert)" >&2; exit 1; }
+
+# ---------------- Версия / пути ----------------
+APP_NAME="ZI Medical tests"
+APP_ID="by.csl.budzdorov"
+VERSION_CODE="${VERSION_CODE:-67}"
+VERSION_NAME="${VERSION_NAME:-1.8.49}"
+
+BUILD_DIR="$ROOT/apk-build"
+SRC_WEB="$ROOT/bud-zdorov"
+OUT_APK="${OUT_APK:-$ROOT/BudZdorov.apk}"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/gen/by/csl/budzdorov" \
@@ -34,25 +67,23 @@ mkdir -p "$BUILD_DIR/gen/by/csl/budzdorov" \
          "$BUILD_DIR/res/mipmap-xxxhdpi" \
          "$BUILD_DIR/res/xml"
 
-echo "[1/9] Copy web assets..."
+echo "[1/9] Copy web assets... ($SRC_WEB)"
 cp -r "$SRC_WEB"/* "$BUILD_DIR/assets/www/"
 rm -f "$BUILD_DIR/assets/www/icons/icon.svg"
 
-echo "[2/9] AndroidManifest.xml"
+echo "[2/9] AndroidManifest.xml (versionCode=$VERSION_CODE, versionName=$VERSION_NAME)"
 cat > "$BUILD_DIR/AndroidManifest.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="$APP_ID"
-    android:versionCode="66"
-    android:versionName="1.8.48"
-    android:compileSdkVersion="34"
-    android:compileSdkVersionCodename="14">
+    android:versionCode="$VERSION_CODE"
+    android:versionName="$VERSION_NAME">
   <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="30"/>
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-  <uses-permission android:name="android.permission.CAMERA" />
+  <!-- NB: android.permission.CAMERA НЕ объявляем: съёмка идёт через системный
+       интент, а объявленное без runtime-запроса разрешение ломает
+       ACTION_IMAGE_CAPTURE на Android 6+ (SecurityException). -->
   <uses-feature android:name="android.hardware.camera" android:required="false"/>
   <application
       android:allowBackup="true"
@@ -116,9 +147,9 @@ convert "$SRC_WEB/icons/icon-512.png" -resize 192x192 "$BUILD_DIR/res/mipmap-xxx
 
 echo "[4/9] Java source..."
 mkdir -p "$BUILD_DIR/src/by/csl/budzdorov"
-cp /home/user/apk-build-tmp/MainActivity.java "$BUILD_DIR/src/by/csl/budzdorov/MainActivity.java"
-cp /home/user/apk-build-tmp/SimpleFileProvider.java "$BUILD_DIR/src/by/csl/budzdorov/SimpleFileProvider.java"
-cp /home/user/NativeStorage.java "$BUILD_DIR/src/by/csl/budzdorov/NativeStorage.java"
+cp "$ROOT/apk-build-tmp/MainActivity.java"      "$BUILD_DIR/src/by/csl/budzdorov/MainActivity.java"
+cp "$ROOT/apk-build-tmp/SimpleFileProvider.java" "$BUILD_DIR/src/by/csl/budzdorov/SimpleFileProvider.java"
+cp "$ROOT/NativeStorage.java"                    "$BUILD_DIR/src/by/csl/budzdorov/NativeStorage.java"
 
 echo "[5/9] Compile resources with aapt..."
 cd "$BUILD_DIR"
@@ -127,34 +158,35 @@ $AAPT package -f -m -J "$BUILD_DIR/gen" -M AndroidManifest.xml -S res -I "$ANDRO
 echo "[6/9] Compile Java..."
 find "$BUILD_DIR/gen" -name "*.java" > "$BUILD_DIR/sources.txt"
 find "$BUILD_DIR/src" -name "*.java" >> "$BUILD_DIR/sources.txt"
-javac -encoding UTF-8 -source 11 -target 11 -classpath "$ANDROID_JAR" -d "$BUILD_DIR/obj" @"$BUILD_DIR/sources.txt"
+javac -encoding UTF-8 -source 11 -target 11 -nowarn -classpath "$ANDROID_JAR" -d "$BUILD_DIR/obj" @"$BUILD_DIR/sources.txt"
 
 echo "[7/9] Convert to dex (d8)..."
-# Find android.jar is provided by aapt already, build classes.dex
-D8_LIB_DEX=
 $D8 --min-api 21 --output "$BUILD_DIR" $(find "$BUILD_DIR/obj" -name "*.class") --lib "$ANDROID_JAR"
 
 echo "[8/9] Package APK..."
 $AAPT package -f -M AndroidManifest.xml -S res -A assets -I "$ANDROID_JAR" -F "$BUILD_DIR/app.unsigned.apk"
-cd "$BUILD_DIR"
-# add classes.dex to apk
 cp "$BUILD_DIR/app.unsigned.apk" "$BUILD_DIR/app.withdex.apk"
 cd "$BUILD_DIR" && zip -j app.withdex.apk classes.dex >/dev/null
 
 echo "[9/9] Align + sign..."
 $ZIPALIGN -f 4 "$BUILD_DIR/app.withdex.apk" "$BUILD_DIR/app.aligned.apk"
 # ---------- Persistent release keystore ----------
-# One signing key, stored OUTSIDE the build dir so it survives cleanups/reinstalls
-# of the build environment. All future APKs will be signed with THE SAME key,
-# which allows Android to install updates without uninstalling the previous version.
-KEYSTORE="/home/user/budzdorov.jks"
+# Один ключ подписи: все новые APK ставятся поверх старых без uninstall.
+# В CI ключ можно передать через секрет BUDZDOROV_KEYSTORE_B64 (base64 файла)
+# и пароль BUDZDOROV_KS_PASS; локально используется budzdorov.jks из репозитория.
+KEYSTORE="${BUDZDOROV_KEYSTORE:-$ROOT/budzdorov.jks}"
+KS_PASS="${BUDZDOROV_KS_PASS:-bz_zdorov_2026}"
+if [ -n "${BUDZDOROV_KEYSTORE_B64:-}" ]; then
+  KEYSTORE="$BUILD_DIR/ci-keystore.jks"
+  echo "$BUDZDOROV_KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+fi
 if [ ! -f "$KEYSTORE" ]; then
-  echo "[key] Generating persistent signing key at $KEYSTORE (keep this file!)..."
+  echo "[key] Generating signing key at $KEYSTORE (keep this file!)..."
   keytool -genkeypair -v \
           -keystore "$KEYSTORE" \
-          -storepass bz_zdorov_2026 \
+          -storepass "$KS_PASS" \
           -alias budzdorov \
-          -keypass bz_zdorov_2026 \
+          -keypass "$KS_PASS" \
           -keyalg RSA -keysize 2048 -validity 36500 \
           -dname "CN=Zakharevich Igor, OU=csl.by, O=CSL, L=Minsk, ST=Minsk, C=BY" >/dev/null
   echo "[key] Keystore created. DO NOT DELETE $KEYSTORE — without it future updates won't install over the old version."
@@ -162,13 +194,13 @@ fi
 $APKSIGNER sign \
   --ks "$KEYSTORE" \
   --ks-key-alias budzdorov \
-  --ks-pass pass:bz_zdorov_2026 \
-  --key-pass pass:bz_zdorov_2026 \
+  --ks-pass "pass:$KS_PASS" \
+  --key-pass "pass:$KS_PASS" \
   --out "$OUT_APK" \
   "$BUILD_DIR/app.aligned.apk"
 # Verify signature
 $APKSIGNER verify --verbose "$OUT_APK" | tail -5
 
 echo ""
-echo "✅ APK built: $OUT_APK"
+echo "✅ APK built: $OUT_APK (v$VERSION_NAME, code $VERSION_CODE)"
 ls -lh "$OUT_APK"

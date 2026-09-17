@@ -76,21 +76,15 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient(){
             @Override
             public boolean shouldOverrideUrlLoading(WebView v, android.webkit.WebResourceRequest r){
-                v.loadUrl(r.getUrl().toString());
-                return true;
+                return handleExternalUrl(r.getUrl().toString());
+            }
+            @SuppressWarnings("deprecation")
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView v, String url){
+                return handleExternalUrl(url); // Android 5.x–6.x (minSdk 21)
             }
         });
         web.setWebChromeClient(new WebChromeClient(){
-            // Legacy + modern file chooser as fallback
-            public void openFileChooser(android.webkit.ValueCallback<Uri> cb, String acc, String cap){
-                startGalleryFallback(cb);
-            }
-            public void openFileChooser(android.webkit.ValueCallback<Uri> cb, String acc){
-                startGalleryFallback(cb);
-            }
-            public void openFileChooser(android.webkit.ValueCallback<Uri> cb){
-                startGalleryFallback(cb);
-            }
             @Override
             public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p){
                 if(filePathCallback!=null){ filePathCallback.onReceiveValue(null); filePathCallback=null; }
@@ -101,17 +95,19 @@ public class MainActivity extends Activity {
                     gal.setType("image/*");
                     gal.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                     Intent chooser = Intent.createChooser(gal, "Выберите фото");
-                    Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-                    if(cam.resolveActivity(getPackageManager())!=null){
+                    // Камера добавляется всегда: на Android 11+ resolveActivity()
+                    // отфильтрован package-visibility и не является надёжной проверкой.
+                    try{
                         File photo = createCameraFile();
                         if(photo!=null){
+                            Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
                             Uri uri = SimpleFileProvider.getUriForFile(MainActivity.this, photo);
                             cam.putExtra(MediaStore.EXTRA_OUTPUT, uri);
                             cam.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                             cam.setClipData(android.content.ClipData.newUri(getContentResolver(),"photo",uri));
                             chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{cam});
                         }
-                    }
+                    }catch(Throwable ignore){}
                     startActivityForResult(chooser, FILE_CHOOSER);
                     return true;
                 }catch(Throwable t){
@@ -122,20 +118,22 @@ public class MainActivity extends Activity {
             }
             @Override
             public void onPermissionRequest(final android.webkit.PermissionRequest request){
-                if(android.os.Build.VERSION.SDK_INT>=21) request.grant(request.getResources());
+                if(android.os.Build.VERSION.SDK_INT<21) return;
+                if(android.os.Build.VERSION.SDK_INT<23){ request.grant(request.getResources()); return; }
+                // Выдаём WebView только те ресурсы, на которые у приложения есть runtime-разрешение
+                final java.util.ArrayList<String> granted = new java.util.ArrayList<>();
+                for(String res : request.getResources()){
+                    if(android.webkit.PermissionRequest.RESOURCE_VIDEO_CAMERA.equals(res)
+                            && checkSelfPermission(android.Manifest.permission.CAMERA)==android.content.pm.PackageManager.PERMISSION_GRANTED){
+                        granted.add(res);
+                    }
+                }
+                if(granted.isEmpty()) request.deny(); else request.grant(granted.toArray(new String[0]));
             }
         });
-        // Aggressive cache purge
-        try{
-            deleteRecursive(new File(getCacheDir(), "org.chromium.android_webview"));
-            deleteRecursive(new File(getCacheDir(), "WebView"));
-            deleteRecursive(new File(getDir("webview", 0), "Cache"));
-            deleteRecursive(new File(getDataDir(), "app_webview"));
-            if(getCacheDir().listFiles()!=null) for(File f : getCacheDir().listFiles()) deleteRecursive(f);
-        }catch(Throwable t){}
+        // Кэш WebView чистим штатными средствами. DOM Storage (localStorage) НЕ трогаем:
+        // там лежат данные, не попавшие в NativeStorage (черновики, настройки).
         web.clearCache(true);
-        web.clearHistory();
-        s.setAppCacheEnabled(false);
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setDatabaseEnabled(true);
         try{
@@ -144,14 +142,29 @@ public class MainActivity extends Activity {
         }catch(Exception e){ web.loadUrl("file:///android_asset/www/index.html"); }
     }
 
-    private ValueCallback<Uri> legacyCb;
-    private void startGalleryFallback(ValueCallback<Uri> cb){
-        legacyCb=cb;
+    /** file:///about:/data:/javascript: грузим в WebView, всё остальное
+     *  (tel:, mailto:, http(s):) отдаём внешнему приложению — иначе WebView
+     *  уводит пользователя со страницы приложения. */
+    private boolean handleExternalUrl(String url){
+        if(url==null) return true;
+        if(url.startsWith("file://")||url.startsWith("about:")||url.startsWith("data:")||url.startsWith("javascript:")) return false;
         try{
-            Intent i = new Intent(Intent.ACTION_GET_CONTENT);
-            i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("image/*");
-            startActivityForResult(Intent.createChooser(i,"Выберите фото"), REQ_GAL);
-        }catch(ActivityNotFoundException e){ if(cb!=null) cb.onReceiveValue(null); legacyCb=null; }
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        }catch(Throwable t){ /* нечем открыть схему — молча игнорируем */ }
+        return true;
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out){
+        super.onSaveInstanceState(out);
+        if(camPhotoPath!=null) out.putString("camPhotoPath", camPhotoPath);
+    }
+    @Override
+    protected void onRestoreInstanceState(Bundle in){
+        super.onRestoreInstanceState(in);
+        camPhotoPath = in.getString("camPhotoPath");
     }
 
     private File createCameraFile(){
@@ -165,20 +178,23 @@ public class MainActivity extends Activity {
     }
 
     private void startCamera(){
+        // NB: resolveActivity() на Android 11+ отфильтрован package-visibility и может
+        // вернуть null даже при рабочей камере, поэтому НЕ гейтим запуск на нём:
+        // неявный интент резолвится системой, а ошибку ловим ниже.
         try{
-            Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-            if(cam.resolveActivity(getPackageManager())==null){
-                deliverErr("Камера недоступна на устройстве");
-                return;
-            }
             File photo = createCameraFile();
             if(photo==null){ deliverErr("Не удалось создать файл фото"); return; }
+            Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
             Uri uri = SimpleFileProvider.getUriForFile(this, photo);
             cam.putExtra(MediaStore.EXTRA_OUTPUT, uri);
             cam.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             cam.setClipData(android.content.ClipData.newUri(getContentResolver(),"photo",uri));
-            startActivityForResult(cam, REQ_CAM);
-        }catch(ActivityNotFoundException e){ deliverErr("Камера не найдена на устройстве"); }
+            try{
+                startActivityForResult(cam, REQ_CAM);
+            }catch(ActivityNotFoundException nfe){
+                startActivityForResult(Intent.createChooser(cam,"Сфотографируйте бланк"), REQ_CAM);
+            }
+        }catch(Throwable e){ deliverErr("Камера недоступна на устройстве ("+e.getClass().getSimpleName()+")"); }
     }
     private void startGallery(boolean multi){
         try{
@@ -230,14 +246,12 @@ public class MainActivity extends Activity {
         // Deliver to WebView's native file chooser if active
         if(req==FILE_CHOOSER){
             if(filePathCallback!=null){ filePathCallback.onReceiveValue(results); filePathCallback=null; }
-            if(legacyCb!=null){ legacyCb.onReceiveValue(results!=null && results.length>0?results[0]:null); legacyCb=null; }
             camPhotoPath=null;
             // Also feed the same files to our JS bridge (so AndroidBridge-initiated picks also work)
             if(results!=null && results.length>0) deliverToJs(results);
             super.onActivityResult(req,res,data); return;
         }
         if(req==REQ_GAL || req==REQ_GAL_MULTI){
-            if(legacyCb!=null){ legacyCb.onReceiveValue(results!=null && results.length>0?results[0]:null); legacyCb=null; }
             if(results!=null && results.length>0) deliverToJs(results);
             else deliverCancel();
             super.onActivityResult(req,res,data); return;
@@ -324,9 +338,4 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed(){ if(web.canGoBack()) web.goBack(); else super.onBackPressed(); }
-    private static void deleteRecursive(File f){
-        if(f==null||!f.exists()) return;
-        if(f.isDirectory()){ File[] k=f.listFiles(); if(k!=null)for(File x:k)deleteRecursive(x); }
-        f.delete();
-    }
 }

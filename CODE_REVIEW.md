@@ -178,3 +178,52 @@ JS↔HTML, сверка классов JS/HTML↔CSS, ручной ревью Ja
   (отсутствующие `ranges`/`advice` у качественных тестов — осознанно).
 - Ассеты внутри `BudZdorov.apk` идентичны исходникам `bud-zdorov/` — сборка
   соответствует коду (кроме устаревшего каталога `apk-build/assets/www`).
+
+---
+
+## E. Исправления, внесённые 2026-09-17
+
+### Код приложения (`bud-zdorov/`)
+- **A1** `data.js`: группы-дубликаты переименованы → `thyroid_full`, `vitamins_ext`;
+  `app.js`: защитные проверки `if(!g) return; if(!t) return;` в обработчике смены пола
+  и ранний выход в `evaluateRow`; новый `rowForKey()` + `LEGACY_GROUP_RENAME` —
+  старые сохранённые ключи (`thyroid::atrtsh` и т.п.) корректно читаются в
+  переименованные группы; `getRange()` получил защиту от `null`.
+  Проверено jsdom-тестом: смена пола, сохранение, загрузка записи и черновика
+  больше не падают; значения больше не теряются.
+- **A2** `runOCR(..., clearBtn)` — параметр добавлен, `ReferenceError` устранён.
+- **A3** `CURRENT_VERSION = '1.8.49'`; версия синхронизирована во всех местах
+  (`index.html`, `sw.js`, манифест: `versionCode=67`, `versionName=1.8.49`).
+- **B1** мёртвая переменная `bestTxt/bestText` удалена.
+- **B2** `#historyView` → `#historyList` (клик-зум ЭКГ в истории и MutationObserver работают).
+- **B4** ФИО/возраст/примечания экранируются через `escHtml` (история, динамика).
+- **B5** `budzdorov_lastversion` добавлен в `PERSIST_KEYS`.
+- **B13** PIN хранится как солёный SHA-256 (`hashPin`), старые plaintext-записи мигрируют.
+- **C** убрана случайная метка `nowNormalTests:`; мёртвый фолбэк `#tab-rec-content`;
+  monkey-patch `renderEcg`/`loadSnapshot` защищён от двойной обёртки;
+  Service Worker регистрируется для http/https (PWA-офлайн снова работает).
+
+### Android-обёртка
+- **A4** разрешение `CAMERA` удалено из манифеста (съёмка через системный интент);
+  `startCamera()` ловит `Throwable`; запуск камеры больше не гейтится на
+  `resolveActivity()` (на Android 11+ он отфильтрован package-visibility).
+- **A5** `shouldOverrideUrlLoading`: `file://` — в WebView, `tel:/mailto:/http(s):` —
+  внешним приложением; добавлена устаревшая перегрузка для Android 5–6.
+- **A6** тексты «О приложении» и комментарии приведены в соответствие с реальным
+  хранением данных (SharedPreferences + Экспорт/Импорт как резервная копия).
+- **B6** удалено рекурсивное стирание кеша/`app_webview` при старте (localStorage живёт).
+- **B7** `camPhotoPath` сохраняется в `onSaveInstanceState`/`onRestoreInstanceState`.
+- **B8** мёртвые перегрузки `openFileChooser` удалены.
+- **B9** `onPermissionRequest` выдаёт WebView только разрешения, реально выданные приложению.
+- `NativeStorage.java`: убраны неиспользуемые импорты, добавлен комментарий о хранении.
+
+### Сборка / CI
+- `build-apk.sh`: пути относительно корня репозитория, автопоиск JDK/SDK,
+  версии через `VERSION_CODE/VERSION_NAME`, пароль ключа через `BUDZDOROV_KS_PASS`,
+  ключ через `BUDZDOROV_KEYSTORE(_B64)`, понятные ошибки при отсутствии SDK.
+- Добавлен workflow `.github/workflows/build-apk.yml`: сборка+подпись APK на каждый
+  push, артефакт `BudZdorov-apk`, опциональный GitHub Release (`workflow_dispatch`).
+- `apk-build/`, `*.idsig`, `.wget-hsts`, `.android/` исключены из git (`.gitignore`,
+  `git rm --cached`) — это генерируемые/служебные файлы.
+- `_complaints_block.js`: починены два битых RegExp, добавлен баннер «легаси-копия».
+- `bud-zdorov/README.md` актуализирован (версия, группы, хранение, сборка, CI).

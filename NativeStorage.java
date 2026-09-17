@@ -3,9 +3,13 @@ package by.csl.budzdorov;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.webkit.JavascriptInterface;
-import org.json.JSONObject;
-import org.json.JSONException;
 
+/**
+ * Мост хранения для WebView: важные ключи журнала лежат в приватных
+ * SharedPreferences приложения — они переживают любые обновления (установку
+ * нового APK поверх), но удаляются вместе с приложением (uninstall).
+ * Для переноса данных между устройствами в приложении есть Экспорт/Импорт JSON.
+ */
 public class NativeStorage {
     private final SharedPreferences sp;
     public NativeStorage(Context c){

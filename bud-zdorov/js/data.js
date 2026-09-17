@@ -812,7 +812,7 @@ const ANALYSIS_GROUPS = [
     ]
   },
   {
-    id:"thyroid",
+    id:"thyroid_full",
     title:"🦋 Щитовидная железа (полная панель)",
     tests:[
       {id:"tsh",name:"ТТГ (тиреотропный гормон)",unit:"мкМЕ/мл",ranges:{any:[0.4,4.0]},
@@ -1058,7 +1058,7 @@ const ANALYSIS_GROUPS = [
     ]
   },
   {
-    id:"vitamins",
+    id:"vitamins_ext",
     title:"💉 Витамины и микроэлементы (расширенная панель)",
     tests:[
       {id:"vitd",name:"Витамин D, 25(ОН)D",unit:"нг/мл",ranges:{any:[30,100]},
