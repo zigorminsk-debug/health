@@ -227,3 +227,14 @@ JS↔HTML, сверка классов JS/HTML↔CSS, ручной ревью Ja
   `git rm --cached`) — это генерируемые/служебные файлы.
 - `_complaints_block.js`: починены два битых RegExp, добавлен баннер «легаси-копия».
 - `bud-zdorov/README.md` актуализирован (версия, группы, хранение, сборка, CI).
+
+### GitHub Actions (автосборка APK)
+- `.github/workflows/build-apk.yml`: на каждый push в `main`/`arena/**` —
+  JS syntax-check, JDK 17, ImageMagick/zip, Android SDK (`build-tools;30.0.3`
+  через официальный cmdline-tools; `platforms;android-30` из репозитория),
+  `bash build-apk.sh`, артефакт `BudZdorov-apk`.
+- Ручной запуск (`workflow_dispatch`) с `publish_release=true` создаёт
+  GitHub Release с готовым APK (тэг `apk-<sha>`).
+- Первый прогон: run 35226244597 — **success**, APK собран и подписан
+  тем же ключом `budzdorov.jks` (обновления ставятся поверх).
+- При падении сборки хвост `build.log` выводится в аннотации run.
