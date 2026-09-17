@@ -59,10 +59,18 @@ jobs:
           ls "$ANDROID_HOME/build-tools/30.0.3" | head
 
       - name: Build APK
-        run: bash build-apk.sh
+        run: bash build-apk.sh 2>&1 | tee build.log
         env:
           BUDZDOROV_KS_PASS: ${{ secrets.BUDZDOROV_KS_PASS }}
           BUDZDOROV_KEYSTORE_B64: ${{ secrets.BUDZDOROV_KEYSTORE_B64 }}
+
+      - name: Surface build log on failure
+        if: failure()
+        run: |
+          echo "::error::===== build.log (tail) ====="
+          tail -n 40 build.log 2>/dev/null | while IFS= read -r line; do
+            echo "::error::${line//$'\r'/}"
+          done
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
